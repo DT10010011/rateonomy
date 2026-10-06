@@ -1,6 +1,6 @@
 Setup instructions
 
-Run this file with the command "python3 test.py [filename]" with your downloaded farmland image file (don't include the brackets).
+To run the test file, use the command "python3 test.py [filename]" with your downloaded farmland image file (don't include the brackets).
 The easiest way to do this is to open VSCode, have all of the files in the same folder, and type the command in the VSCode terminal.
 Also, you first need to obtain a Gemini API key from Google AI Studio.
 Google offers a free tier of the Gemini API, so you won't be charged for running this code.
