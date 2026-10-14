@@ -2,6 +2,7 @@
 
 #Calculate cost for conventional operations
 #ConEquipment Cost
+class conventional
 conEquipCost = int(input("Enter purchase price for a new machine or amount left on equipment loan"))
 conSubCost = int(input("Enter price for subcriptions used on your conventional fleet. This includes products such as autosteer, RTK, and anyother added subscriptions."))
 conTotalCost = conEquipCost+conSubCost 
@@ -13,6 +14,7 @@ conLaborCost = conNumMachines*conLaborRate
 print("conlaborcost", conLaborCost)
 #Calculate cost for autonomus operations
 
+class autnonomy 
 #AutEqiupment Cost
 autEquipCost = int(input("Enter purchase price for a new machine or amount left on equipment loan"))
 autRetroCost = int(input("Enter price to install autnomy kit if required. If none click enter to skip.") or 0)
@@ -26,6 +28,8 @@ dedicatedTimeRaw = int(input("Enter the percentage of time operator speds superv
 dedicatedTimeProcessed = dedicatedTimeRaw/100
 autLaborRate = int(input("Enter labor rate ($/Hr)"))
 autLaborCost = (autLaborRate*dedicatedTimeProcessed)/autNumMachines
+
+class analysis
 print("autLaborCost", autLaborCost)
 #Savings From Autonomy
 savings = conLaborCost-autLaborCost
