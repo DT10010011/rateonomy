@@ -1,0 +1,136 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+# (key, label, type, default)  default None = required
+CONVENTIONAL_FIELDS = [
+    ("conEquipCost", "Machine purchase price or remaining loan ($)", int, None),
+    ("conSubCost", "Subscriptions: autosteer, RTK, etc. ($)", int, None),
+    ("conNumMachines", "Number of machines that could be autonomy enabled", int, None),
+    ("conLaborRate", "Labor rate ($/hr)", float, None),
+]
+
+AUTONOMY_FIELDS = [
+    ("autEquipCost", "Machine purchase price or remaining loan ($)", int, None),
+    ("autRetroCost", "Autonomy kit install cost, blank if none ($)", int, 0),
+    ("autSubCost", "Required subscriptions: autosteer, RTK, etc. ($)", int, None),
+    ("autNumMachines", "Number of machines that could be autonomy enabled", int, None),
+    ("autMachinesPerOperator", "Machines per operator", int, None),
+    ("dedicatedTimeRaw", "% of time operator spends supervising (1-100)", int, None),
+    ("autLaborRate", "Labor rate ($/hr)", float, None),
+    ("hoursPerMonth", "Machine operating hours per month", float, None),
+]
+
+
+class ROIApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Autonomy ROI Calculator")
+        self.resizable(False, False)
+        self.entries = {}
+        self.result_vars = {}
+
+        frame = ttk.Frame(self, padding=12)
+        frame.grid(row=0, column=0)
+
+        self._build_section(frame, "Conventional Operations", CONVENTIONAL_FIELDS, 0)
+        self._build_section(frame, "Autonomous Operations", AUTONOMY_FIELDS, 1)
+        self._build_results(frame)
+
+        btns = ttk.Frame(frame)
+        btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(btns, text="Calculate", command=self.calculate).pack(side="left", padx=4)
+        ttk.Button(btns, text="Clear", command=self.clear).pack(side="left", padx=4)
+
+    def _build_section(self, parent, title, fields, col):
+        box = ttk.LabelFrame(parent, text=title, padding=10)
+        box.grid(row=0, column=col, padx=6, pady=6, sticky="n")
+        for r, (key, label, _type, default) in enumerate(fields):
+            ttk.Label(box, text=label, wraplength=260, justify="left").grid(
+                row=r, column=0, sticky="w", pady=3
+            )
+            entry = ttk.Entry(box, width=14)
+            entry.grid(row=r, column=1, padx=(8, 0), pady=3)
+            self.entries[key] = entry
+
+    def _build_results(self, parent):
+        box = ttk.LabelFrame(parent, text="Analysis", padding=10)
+        box.grid(row=1, column=0, columnspan=2, padx=6, pady=6, sticky="ew")
+        rows = [
+            ("conTotalCost", "Conventional total cost"),
+            ("conLaborCost", "Conventional labor cost"),
+            ("autTotalCost", "Autonomy total cost"),
+            ("autLaborCost", "Autonomy labor cost"),
+            ("savings", "Autonomy labor savings ($/hr)"),
+            ("monthlySavings", "Autonomy labor savings ($/month)"),
+            ("payback", "Payback"),
+        ]
+        for r, (key, label) in enumerate(rows):
+            ttk.Label(box, text=label + ":").grid(row=r, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value="-")
+            ttk.Label(box, textvariable=var, font=("TkDefaultFont", 10, "bold")).grid(
+                row=r, column=1, sticky="e", padx=(20, 0)
+            )
+            self.result_vars[key] = var
+
+    def _read(self, fields):
+        values = {}
+        for key, label, typ, default in fields:
+            text = self.entries[key].get().strip()
+            if not text:
+                if default is None:
+                    raise ValueError(f"Missing value: {label}")
+                values[key] = default
+                continue
+            try:
+                values[key] = typ(text)
+            except ValueError:
+                raise ValueError(f"Invalid number for: {label}")
+        return values
+
+    def calculate(self):
+        try:
+            con = self._read(CONVENTIONAL_FIELDS)
+            aut = self._read(AUTONOMY_FIELDS)
+        except ValueError as e:
+            messagebox.showerror("Input error", str(e))
+            return
+
+        if not 1 <= aut["dedicatedTimeRaw"] <= 100:
+            messagebox.showerror("Input error", "Supervising time must be between 1 and 100.")
+            return
+        if aut["autNumMachines"] == 0:
+            messagebox.showerror("Input error", "Number of machines cannot be 0.")
+            return
+
+        conTotalCost = con["conEquipCost"] + con["conSubCost"]
+        conLaborCost = con["conNumMachines"] * con["conLaborRate"]
+
+        autTotalCost = aut["autEquipCost"] + aut["autRetroCost"] + aut["autSubCost"]
+        dedicatedTime = aut["dedicatedTimeRaw"] / 100
+        autLaborCost = (aut["autLaborRate"] * dedicatedTime) / aut["autNumMachines"]
+
+        savings = conLaborCost - autLaborCost
+        costdif = conTotalCost - autTotalCost
+
+        self.result_vars["conTotalCost"].set(f"${conTotalCost:,.2f}")
+        self.result_vars["conLaborCost"].set(f"${conLaborCost:,.2f}")
+        self.result_vars["autTotalCost"].set(f"${autTotalCost:,.2f}")
+        self.result_vars["autLaborCost"].set(f"${autLaborCost:,.2f}")
+        self.result_vars["savings"].set(f"${savings:,.2f}")
+        self.result_vars["monthlySavings"].set(f"${savings * aut['hoursPerMonth']:,.2f}")
+
+        monthlySavings = savings * aut["hoursPerMonth"]
+        if monthlySavings == 0:
+            self.result_vars["payback"].set("N/A (no savings)")
+        else:
+            self.result_vars["payback"].set(f"{costdif / monthlySavings:,.1f} months")
+
+    def clear(self):
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+        for var in self.result_vars.values():
+            var.set("-")
+
+
+if __name__ == "__main__":
+    ROIApp().mainloop()
