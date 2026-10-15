@@ -17,7 +17,6 @@ AUTONOMY_FIELDS = [
     ("autMachinesPerOperator", "Machines per operator", int, None),
     ("dedicatedTimeRaw", "% of time operator spends supervising (1-100)", int, None),
     ("autLaborRate", "Labor rate ($/hr)", float, None),
-    ("hoursPerMonth", "Machine operating hours per month", float, None),
 ]
 
 
@@ -61,8 +60,8 @@ class ROIApp(tk.Tk):
             ("autTotalCost", "Autonomy total cost"),
             ("autLaborCost", "Autonomy labor cost"),
             ("savings", "Autonomy labor savings ($/hr)"),
-            ("monthlySavings", "Autonomy labor savings ($/month)"),
-            ("payback", "Payback"),
+            ("payback", "Payback period (hours)"),
+            ("paybackWeeks", "Payback period (weeks, 40 hr/week)"),
         ]
         for r, (key, label) in enumerate(rows):
             ttk.Label(box, text=label + ":").grid(row=r, column=0, sticky="w", pady=2)
@@ -110,20 +109,21 @@ class ROIApp(tk.Tk):
         autLaborCost = (aut["autLaborRate"] * dedicatedTime) / aut["autNumMachines"]
 
         savings = conLaborCost - autLaborCost
-        costdif = conTotalCost - autTotalCost
+        costdif = autTotalCost - conTotalCost
 
         self.result_vars["conTotalCost"].set(f"${conTotalCost:,.2f}")
         self.result_vars["conLaborCost"].set(f"${conLaborCost:,.2f}")
         self.result_vars["autTotalCost"].set(f"${autTotalCost:,.2f}")
         self.result_vars["autLaborCost"].set(f"${autLaborCost:,.2f}")
         self.result_vars["savings"].set(f"${savings:,.2f}")
-        self.result_vars["monthlySavings"].set(f"${savings * aut['hoursPerMonth']:,.2f}")
 
-        monthlySavings = savings * aut["hoursPerMonth"]
-        if monthlySavings == 0:
-            self.result_vars["payback"].set("N/A (no savings)")
+        if savings <= 0:
+            self.result_vars["payback"].set("Never pays back")
+            self.result_vars["paybackWeeks"].set("Never pays back")
         else:
-            self.result_vars["payback"].set(f"{costdif / monthlySavings:,.1f} months")
+            paybackHours = costdif / savings
+            self.result_vars["payback"].set(f"{paybackHours:,.1f} hours")
+            self.result_vars["paybackWeeks"].set(f"{paybackHours / 40:,.1f} weeks")
 
     def clear(self):
         for entry in self.entries.values():
