@@ -1,11 +1,11 @@
 import ROIGUI
-import ROIRating
+import Rating
 
 
 def main():
 	roi_app = ROIGUI.ROIApp()
 	roi_app.mainloop()
-	ROIRating.printpayback(roi_app)
+	Rating.printpayback(roi_app)
 
 
 if __name__ == "__main__":
