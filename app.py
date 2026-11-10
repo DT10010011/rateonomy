@@ -59,35 +59,17 @@ def compute_roi_score(payback_years=None):
     if payback_years is None:
         score = 0
         payback_label = "Never pays back"
-    elif payback_years <= 0.5:
-        score = 1
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 2:
-        score = 2
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 3:
-        score = 3
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 4:
-        score = 4
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 5:
-        score = 5
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 6:
-        score = 6
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 7:
-        score = 7
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 8:
-        score = 8
-        payback_label = f"{payback_years:,.1f} years"
-    elif payback_years < 9:
-        score = 9
-        payback_label = f"{payback_years:,.1f} years"
     else:
-        score = 10
+        ratings = [
+            (9, 10), (8, 9), (7, 8), (6, 7), (5, 6),
+            (4, 5), (3, 4), (2, 3), (1.5, 2), (1,1)
+        ]
+        score = 1
+        if payback_years > 0.5:
+            for limit, rating in ratings:
+                if payback_years >= limit:
+                    score = rating
+                    break
         payback_label = f"{payback_years:,.1f} years"
 
     return {
@@ -633,15 +615,24 @@ class ROIApp(tk.Toplevel):
             messagebox.showerror("Input error", "Supervising time must be between 1 and 100.",
                                  parent=self)
             return
-        if aut["autNumMachines"] == 0:
-            messagebox.showerror("Input error", "Number of machines cannot be 0.", parent=self)
+        if aut["autNumMachines"] <= 0:
+            messagebox.showerror("Input error", "Number of machines must be greater than 0.",
+                                 parent=self)
+            return
+        if aut["autMachinesPerOperator"] <= 0:
+            messagebox.showerror("Input error", "Machines per operator must be greater than 0.",
+                                 parent=self)
             return
 
-        conTotalCost = con["conEquipCost"] + con["conSubCost"]
+        conTotalCost = (con["conEquipCost"] + con["conSubCost"]) * con["conNumMachines"]
         conLaborCost = con["conNumMachines"] * con["conLaborRate"]
-        autTotalCost = aut["autEquipCost"] + aut["autRetroCost"] + aut["autSubCost"]
+        autTotalCost = (
+            aut["autEquipCost"] + aut["autRetroCost"] + aut["autSubCost"]
+        ) * aut["autNumMachines"]
         dedicatedTime = aut["dedicatedTimeRaw"] / 100
-        autLaborCost = (aut["autLaborRate"] * dedicatedTime) / aut["autNumMachines"]
+        autLaborCost = (
+            aut["autLaborRate"] * dedicatedTime
+        ) / aut["autMachinesPerOperator"]
 
         savings = conLaborCost - autLaborCost
         costdif = autTotalCost - conTotalCost
