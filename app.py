@@ -99,6 +99,18 @@ def _find_predictions(obj):
     return None
 
 
+def count_nondrivable_objects(response):
+    """Count NonDrivable predictions in a Roboflow workflow response."""
+    predictions = _find_predictions(response)
+    if predictions is None:
+        raise ValueError("No predictions list found in the workflow response.")
+
+    return sum(
+        1 for prediction in predictions
+        if str(prediction.get("class", "")).casefold() == "nondrivable"
+    )
+
+
 def _class_mask(predictions, size, class_filter):
     """Rasterize all polygons of matching classes into one 0/1 mask.
 
@@ -153,6 +165,7 @@ def compute_drivability_score(image_path=None, field_area=None):
         raise RuntimeError(
             "Could not find predictions in the workflow response: " + str(result)[:300]
         )
+    nondrivable_count = count_nondrivable_objects(result)
 
     with Image.open(image_path) as img:
         width, height = img.size
@@ -189,6 +202,7 @@ def compute_drivability_score(image_path=None, field_area=None):
             ("Obstacle coverage", f"{obstacle_frac:.1%}"),
             ("Drivable coverage", f"{drivable_frac:.1%}"),
             ("Image drivability rating", f"{image_rating} / 10"),
+            ("NonDrivable objects", str(nondrivable_count)),
             ("Field size", f"{field_area:,.1f} acres"),
             ("Field size rating", f"{field_size_score:.1f} / 10"),
             ("Regions detected", str(len(preds))),
@@ -669,6 +683,84 @@ class ROIApp(tk.Toplevel):
             self.on_result(None, False)
 
 
+class DrivabilityInputWindow(tk.Toplevel):
+    def __init__(self, master, image_path, field_area, on_apply):
+        super().__init__(master)
+        self.title("Drivability Inputs")
+        self.geometry("620x250")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.image_path = image_path
+        self.on_apply = on_apply
+
+        header = tk.Frame(self, bg=HEADER)
+        header.pack(fill="x")
+        tk.Label(header, text="Drivability Inputs", font=(FONT, 18, "bold"),
+                 fg="white", bg=HEADER).pack(anchor="w", padx=22, pady=(12, 2))
+        tk.Label(header, text="Choose a field image and enter its size",
+                 font=(FONT, 10), fg=HEADER_SUB, bg=HEADER).pack(
+                     anchor="w", padx=22, pady=(0, 12)
+                 )
+
+        content = tk.Frame(self, bg=BG)
+        content.pack(fill="both", expand=True, padx=20, pady=16)
+        image_row = tk.Frame(content, bg=BG)
+        image_row.pack(fill="x", pady=(0, 14))
+        ttk.Button(image_row, text="Select Field Image...",
+                   style="Secondary.TButton", command=self.select_image).pack(side="left")
+        self.image_var = tk.StringVar(value=self._image_label(image_path))
+        tk.Label(image_row, textvariable=self.image_var, font=(FONT, 10),
+                 fg=MUTED, bg=BG).pack(side="left", padx=12)
+
+        size_row = tk.Frame(content, bg=BG)
+        size_row.pack(fill="x")
+        tk.Label(size_row, text="Field size (acres)", font=(FONT, 10),
+                 fg=TEXT, bg=BG).pack(side="left")
+        self.field_area_entry = ttk.Entry(size_row, width=14)
+        self.field_area_entry.pack(side="left", padx=(10, 0))
+        if field_area is not None:
+            self.field_area_entry.insert(0, str(field_area))
+
+        buttons = tk.Frame(content, bg=BG)
+        buttons.pack(side="right", pady=(16, 0))
+        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
+                   command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Apply", style="Accent.TButton",
+                   command=self.apply).pack(side="left", padx=4)
+
+    @staticmethod
+    def _image_label(image_path):
+        return os.path.basename(image_path) if image_path else "No field image selected"
+
+    def select_image(self):
+        path = filedialog.askopenfilename(
+            title="Select satellite image of field",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.tif *.tiff"),
+                       ("All files", "*.*")],
+            parent=self,
+        )
+        if path:
+            self.image_path = path
+            self.image_var.set(self._image_label(path))
+
+    def apply(self):
+        field_area = None
+        if self.image_path:
+            try:
+                field_area = float(self.field_area_entry.get().strip())
+            except ValueError:
+                messagebox.showerror("Input error", "Enter the field size in acres.",
+                                     parent=self)
+                return
+            if not math.isfinite(field_area) or field_area <= 0:
+                messagebox.showerror("Input error", "Field size must be greater than 0 acres.",
+                                     parent=self)
+                return
+
+        self.on_apply(self.image_path, field_area)
+        self.destroy()
+
+
 class RateOnomyApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -682,6 +774,7 @@ class RateOnomyApp(tk.Tk):
         self.roi_window = None
         self.roi_payback_years = None
         self.roi_calculated = False
+        self.drivability_window = None
 
         # Header banner
         header = tk.Frame(self, bg=HEADER)
@@ -694,8 +787,9 @@ class RateOnomyApp(tk.Tk):
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=20, pady=16)
 
-        # Controls card: image picker on the left, actions on the right
+        # Controls card: input windows on the left, actions on the right
         self.image_path = None
+        self.field_area = None
         self.image_var = tk.StringVar(value="No field image selected")
         controls = make_card(body)
         controls.pack(fill="x")
@@ -705,9 +799,11 @@ class RateOnomyApp(tk.Tk):
                       style="Secondary.TButton",
                       command=self.open_roi_calculator)
         self.roi_btn.pack(side="left", padx=(0, 8))
-        self.pick_btn = ttk.Button(cin, text="Select Field Image...",
-                                   style="Secondary.TButton", command=self.select_image)
-        self.pick_btn.pack(side="left")
+        self.drivability_btn = ttk.Button(
+            cin, text="Drivability Inputs...", style="Secondary.TButton",
+            command=self.open_drivability_inputs,
+        )
+        self.drivability_btn.pack(side="left")
         tk.Label(cin, textvariable=self.image_var, font=(FONT, 10), fg=MUTED,
                  bg=CARD).pack(side="left", padx=12)
         self.run_btn = ttk.Button(cin, text="Run Assessment", style="Accent.TButton",
@@ -716,13 +812,6 @@ class RateOnomyApp(tk.Tk):
         self.clear_btn = ttk.Button(cin, text="Clear", style="Secondary.TButton",
                                     command=self.clear)
         self.clear_btn.pack(side="right", padx=(0, 10))
-
-        size_row = tk.Frame(controls, bg=CARD)
-        size_row.pack(fill="x", padx=16, pady=(0, 12))
-        tk.Label(size_row, text="Field size (acres)", font=(FONT, 10),
-             fg=TEXT, bg=CARD).pack(side="left")
-        self.field_area_entry = ttk.Entry(size_row, width=12)
-        self.field_area_entry.pack(side="left", padx=(8, 0))
 
         # Loading indicator (only packed while an assessment is running)
         self._running = False
@@ -811,21 +900,25 @@ class RateOnomyApp(tk.Tk):
         else:
             self.roi_panel.clear()
 
-    def select_image(self):
-        path = filedialog.askopenfilename(
-            title="Select satellite image of field",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.tif *.tiff"), ("All files", "*.*")],
+    def open_drivability_inputs(self):
+        if self.drivability_window is not None and self.drivability_window.winfo_exists():
+            self.drivability_window.lift()
+            self.drivability_window.focus_force()
+            return
+        self.drivability_window = DrivabilityInputWindow(
+            self, self.image_path, self.field_area, self._on_drivability_inputs
         )
-        if path:
-            self.image_path = path
-            self.image_var.set(os.path.basename(path))
-            self.field_area_entry.delete(0, tk.END)
+        self.drivability_window.transient(self)
+
+    def _on_drivability_inputs(self, image_path, field_area):
+        self.image_path = image_path
+        self.field_area = field_area
+        self.image_var.set(DrivabilityInputWindow._image_label(image_path))
 
     def _set_running(self, running):
         self._running = running
         state = "disabled" if running else "normal"
-        for btn in (self.run_btn, self.clear_btn, self.pick_btn, self.roi_btn,
-                self.field_area_entry):
+        for btn in (self.run_btn, self.clear_btn, self.drivability_btn, self.roi_btn):
             btn.config(state=state)
         if running:
             self.status_frame.pack(side="right", padx=(0, 16))
@@ -847,16 +940,7 @@ class RateOnomyApp(tk.Tk):
             return
         image_path = self.image_path
         roi_payback_years = self.roi_payback_years
-        field_area = None
-        if image_path:
-            try:
-                field_area = float(self.field_area_entry.get().strip())
-            except ValueError:
-                messagebox.showerror("Input error", "Enter the field size in acres.")
-                return
-            if not math.isfinite(field_area) or field_area <= 0:
-                messagebox.showerror("Input error", "Field size must be greater than 0 acres.")
-                return
+        field_area = self.field_area
 
         self._set_running(True)
         self._outcome = {}
@@ -903,6 +987,11 @@ class RateOnomyApp(tk.Tk):
         self.feasibility_label.config(text=f"  {feasible}  ", bg=pill_color)
 
     def clear(self):
+        self.image_path = None
+        self.field_area = None
+        self.image_var.set("No field image selected")
+        if self.drivability_window is not None and self.drivability_window.winfo_exists():
+            self.drivability_window.destroy()
         if self.roi_window is not None and self.roi_window.winfo_exists():
             self.roi_window.clear()
         else:
