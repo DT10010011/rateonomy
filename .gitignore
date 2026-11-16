@@ -4,3 +4,4 @@ __pycache__/ROIRating.cpython-313.pyc
 build/
 dist/
 rateonomy-0.0.1.spec
+app.py

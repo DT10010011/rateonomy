@@ -182,6 +182,7 @@ def compute_drivability_score(image_path=None, field_area=None):
     drivable_frac = clear_mask.histogram()[1] / total
     obstacle_frac = 1.0 - drivable_frac
     image_coverage = drivable_frac * 100
+    obstacle_adjustment = nondrivable_count*0.1
     ratings = [
         (98, 10), (96, 9), (94, 8), (92, 7), (90, 6),
         (88, 5), (86, 4), (84, 3), (82, 2), (0, 1),
@@ -191,9 +192,10 @@ def compute_drivability_score(image_path=None, field_area=None):
         if image_coverage >= limit:
             image_rating = rating
             break
-
+    
+# scores are penalized on a basis of .1 per obstacle. 
     field_size_score = min(MAX_SCORE, (field_area / 1000) * MAX_SCORE)
-    score = 0.9 * image_rating + 0.1 * field_size_score
+    score = (0.9 * image_rating + 0.1 * field_size_score) - obstacle_adjustment
 
     return {
         "score": round(score, 1),
@@ -548,6 +550,8 @@ class ROIApp(tk.Toplevel):
                    command=self.calculate).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", style="ROI.Secondary.TButton",
                    command=self.clear).pack(side="left", padx=4)
+        ttk.Button(btns, text="Done", style="ROI.Secondary.TButton",
+                   command=self.destroy).pack(side="left", padx=4)
 
     def _setup_styles(self):
         style = ttk.Style(self)
@@ -790,7 +794,7 @@ class RateOnomyApp(tk.Tk):
         # Controls card: input windows on the left, actions on the right
         self.image_path = None
         self.field_area = None
-        self.image_var = tk.StringVar(value="No field image selected")
+        self.image_var = tk.StringVar(value="")
         controls = make_card(body)
         controls.pack(fill="x")
         cin = tk.Frame(controls, bg=CARD)
@@ -913,7 +917,7 @@ class RateOnomyApp(tk.Tk):
     def _on_drivability_inputs(self, image_path, field_area):
         self.image_path = image_path
         self.field_area = field_area
-        self.image_var.set(DrivabilityInputWindow._image_label(image_path))
+        self.image_var.set(os.path.basename(image_path) if image_path else "")
 
     def _set_running(self, running):
         self._running = running
@@ -989,7 +993,7 @@ class RateOnomyApp(tk.Tk):
     def clear(self):
         self.image_path = None
         self.field_area = None
-        self.image_var.set("No field image selected")
+        self.image_var.set("")
         if self.drivability_window is not None and self.drivability_window.winfo_exists():
             self.drivability_window.destroy()
         if self.roi_window is not None and self.roi_window.winfo_exists():
