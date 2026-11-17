@@ -1,11 +1,11 @@
-"""RateOnomy - Autonomy Decision Support Tool (UI skeleton)
+"""RateOnomy - Autonomy Decision Support Tool
 
 Three components (ROI, Drivability, Legal) feed a weighted composite score.
-All three component scores are currently DUMMY values (10/10). To plug in the
-real modules later, replace the body of the three compute_* functions below.
+ROI and drivability use calculated inputs; legal feasibility remains a dummy.
 """
 
 import os
+import math
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font as tkfont
@@ -54,13 +54,28 @@ ROBOFLOW_WORKFLOW_ID = "instancedriveablityscore"
 # ---------------------------------------------------------------------------
 # Component stubs - replace these with the real implementations
 # ---------------------------------------------------------------------------
-def compute_roi_score(inputs=None):
+def compute_roi_score(payback_years=None):
     """Return dict with ROI score (0-10) and display details."""
-    # TODO: call the standalone ROI calculator and map payback period to 0-10
+    if payback_years is None:
+        score = 0
+        payback_label = "Never pays back"
+    else:
+        ratings = [
+            (9, 10), (8, 9), (7, 8), (6, 7), (5, 6),
+            (4, 5), (3, 4), (2, 3), (1.5, 2), (1,1)
+        ]
+        score = 1
+        if payback_years > 0.5:
+            for limit, rating in ratings:
+                if payback_years >= limit:
+                    score = rating
+                    break
+        payback_label = f"{payback_years:,.1f} years"
+
     return {
-        "score": 10.0,
-        "summary": "Dummy ROI score (calculator not yet integrated).",
-        "details": [("Payback period (weeks)", "N/A (dummy)")],
+        "score": float(score),
+        "summary": "ROI rating is based on the calculated payback period.",
+        "details": [("Payback period", payback_label), ("ROI rating", f"{score} / 10")],
     }
 
 
@@ -84,6 +99,18 @@ def _find_predictions(obj):
     return None
 
 
+def count_nondrivable_objects(response):
+    """Count NonDrivable predictions in a Roboflow workflow response."""
+    predictions = _find_predictions(response)
+    if predictions is None:
+        raise ValueError("No predictions list found in the workflow response.")
+
+    return sum(
+        1 for prediction in predictions
+        if str(prediction.get("class", "")).casefold() == "nondrivable"
+    )
+
+
 def _class_mask(predictions, size, class_filter):
     """Rasterize all polygons of matching classes into one 0/1 mask.
 
@@ -105,7 +132,9 @@ def compute_drivability_score(image_path=None, field_area=None):
 
     Drivable pixels = area the model labels Drivable, minus anything it also
     labels NonDrivable. Everything else in the image counts as obstacle.
-    Score = 10 * (1 - obstacle coverage) = 10 * drivable coverage.
+    Drivable coverage is mapped to a 1-10 image rating. The image rating
+    contributes 90%; field size contributes 10%, scaled to 10 points at
+    1,000 acres.
     Raises an exception if the Roboflow call fails (caller shows the error).
     """
     if not image_path:
@@ -114,6 +143,8 @@ def compute_drivability_score(image_path=None, field_area=None):
             "summary": "No image selected - using dummy score.",
             "details": [("Obstacle coverage", "N/A (dummy)")],
         }
+    if field_area is None or not math.isfinite(field_area) or field_area <= 0:
+        raise ValueError("Enter a field size greater than 0 acres.")
 
     api_key = os.environ.get("ROBOFLOW_API_KEY")
     if not api_key:
@@ -134,6 +165,7 @@ def compute_drivability_score(image_path=None, field_area=None):
         raise RuntimeError(
             "Could not find predictions in the workflow response: " + str(result)[:300]
         )
+    nondrivable_count = count_nondrivable_objects(result)
 
     with Image.open(image_path) as img:
         width, height = img.size
@@ -149,13 +181,32 @@ def compute_drivability_score(image_path=None, field_area=None):
 
     drivable_frac = clear_mask.histogram()[1] / total
     obstacle_frac = 1.0 - drivable_frac
+    image_coverage = drivable_frac * 100
+    obstacle_adjustment = nondrivable_count*0.1
+    ratings = [
+        (98, 10), (96, 9), (94, 8), (92, 7), (90, 6),
+        (88, 5), (86, 4), (84, 3), (82, 2), (0, 1),
+    ]
+    image_rating = 1
+    for limit, rating in ratings:
+        if image_coverage >= limit:
+            image_rating = rating
+            break
+    
+# scores are penalized on a basis of .1 per obstacle. 
+    field_size_score = min(MAX_SCORE, (field_area / 1000) * MAX_SCORE)
+    score = (0.9 * image_rating + 0.1 * field_size_score) - obstacle_adjustment
 
     return {
-        "score": round(MAX_SCORE * (1.0 - obstacle_frac), 1),
-        "summary": "Score = 10 x (1 - obstacle coverage). Anything not labeled drivable counts as obstacle.",
+        "score": round(score, 1),
+        "summary": "Score combines image rating (90%) and field size (10%).",
         "details": [
             ("Obstacle coverage", f"{obstacle_frac:.1%}"),
             ("Drivable coverage", f"{drivable_frac:.1%}"),
+            ("Image drivability rating", f"{image_rating} / 10"),
+            ("NonDrivable objects", str(nondrivable_count)),
+            ("Field size", f"{field_area:,.1f} acres"),
+            ("Field size rating", f"{field_size_score:.1f} / 10"),
             ("Regions detected", str(len(preds))),
             ("Classes found", ", ".join(sorted({p.get("class", "?") for p in preds})) or "none"),
         ],
@@ -444,6 +495,276 @@ class ScorePanel(tk.Frame):
         self._clear_details()
 
 
+CONVENTIONAL_FIELDS = [
+    ("conEquipCost", "Machine purchase price or remaining loan ($)", int, None),
+    ("conSubCost", "Subscriptions: autosteer, RTK, etc. ($)", int, None),
+    ("conNumMachines", "Number of machines that could be autonomy enabled", int, None),
+    ("conLaborRate", "Labor rate ($/hr)", float, None),
+]
+
+AUTONOMY_FIELDS = [
+    ("autEquipCost", "Machine purchase price or remaining loan ($)", int, None),
+    ("autRetroCost", "Autonomy kit install cost, blank if none ($)", int, 0),
+    ("autSubCost", "Required subscriptions: autosteer, RTK, etc. ($)", int, None),
+    ("autNumMachines", "Number of machines that could be autonomy enabled", int, None),
+    ("autMachinesPerOperator", "Machines per operator", int, None),
+    ("dedicatedTimeRaw", "% of time operator spends supervising (1-100)", int, None),
+    ("autLaborRate", "Labor rate ($/hr)", float, None),
+]
+
+
+class ROIApp(tk.Toplevel):
+    def __init__(self, master, on_result=None, font_family="Segoe UI"):
+        super().__init__(master)
+        self.title("Autonomy ROI Calculator")
+        self.geometry("900x700")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.entries = {}
+        self.result_vars = {}
+        self.payback_years = None
+        self.on_result = on_result
+        self.font_family = font_family
+        self._setup_styles()
+
+        header = tk.Frame(self, bg=HEADER)
+        header.pack(fill="x")
+        tk.Label(header, text="Autonomy ROI Calculator",
+                 font=(font_family, 20, "bold"), fg="white", bg=HEADER).pack(
+                     anchor="w", padx=24, pady=(14, 2)
+                 )
+        tk.Label(header, text="Compare conventional and autonomous operating costs",
+                 font=(font_family, 10), fg=HEADER_SUB, bg=HEADER).pack(
+                     anchor="w", padx=24, pady=(0, 14)
+                 )
+
+        frame = tk.Frame(self, bg=BG)
+        frame.pack(fill="both", expand=True, padx=18, pady=16)
+        self._build_section(frame, "Conventional Operations", CONVENTIONAL_FIELDS, 0)
+        self._build_section(frame, "Autonomous Operations", AUTONOMY_FIELDS, 1)
+        self._build_results(frame)
+
+        btns = tk.Frame(frame, bg=BG)
+        btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(btns, text="Calculate", style="ROI.Accent.TButton",
+                   command=self.calculate).pack(side="left", padx=4)
+        ttk.Button(btns, text="Clear", style="ROI.Secondary.TButton",
+                   command=self.clear).pack(side="left", padx=4)
+        ttk.Button(btns, text="Done", style="ROI.Secondary.TButton",
+                   command=self.destroy).pack(side="left", padx=4)
+
+    def _setup_styles(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("ROI.TLabelframe", background=CARD, bordercolor=BORDER,
+                        relief="solid", padding=10)
+        style.configure("ROI.TLabelframe.Label", background=CARD, foreground=MUTED,
+                        font=(self.font_family, 10, "bold"))
+        style.configure("ROI.TLabel", background=CARD, foreground=TEXT,
+                        font=(self.font_family, 9))
+        style.configure("ROI.TEntry", fieldbackground=CARD, padding=4)
+        style.configure("ROI.Accent.TButton", font=(self.font_family, 10, "bold"),
+                        foreground="white", background=ACCENT, borderwidth=0,
+                        padding=(18, 8))
+        style.map("ROI.Accent.TButton", background=[("active", ACCENT_DARK)])
+        style.configure("ROI.Secondary.TButton", font=(self.font_family, 10),
+                        foreground=TEXT, background="#E4E9E3", borderwidth=0,
+                        padding=(14, 8))
+        style.map("ROI.Secondary.TButton", background=[("active", "#D5DCD4")])
+
+    def _build_section(self, parent, title, fields, col):
+        box = ttk.LabelFrame(parent, text=title, style="ROI.TLabelframe")
+        box.grid(row=0, column=col, padx=6, pady=6, sticky="nsew")
+        for r, (key, label, _type, _default) in enumerate(fields):
+            ttk.Label(box, text=label, wraplength=260, justify="left",
+                      style="ROI.TLabel").grid(row=r, column=0, sticky="w", pady=3)
+            entry = ttk.Entry(box, width=14, style="ROI.TEntry")
+            entry.grid(row=r, column=1, padx=(8, 0), pady=3)
+            self.entries[key] = entry
+
+    def _build_results(self, parent):
+        box = ttk.LabelFrame(parent, text="Analysis", style="ROI.TLabelframe")
+        box.grid(row=1, column=0, columnspan=2, padx=6, pady=6, sticky="ew")
+        rows = [
+            ("conTotalCost", "Conventional total cost"),
+            ("conLaborCost", "Conventional labor cost"),
+            ("autTotalCost", "Autonomy total cost"),
+            ("autLaborCost", "Autonomy labor cost"),
+            ("savings", "Autonomy labor savings ($/hr)"),
+            ("payback", "Payback period (hours)"),
+            ("paybackWeeks", "Payback period (weeks, 40 hr/week)"),
+            ("paybackYears", "Payback period (years)"),
+        ]
+        for r, (key, label) in enumerate(rows):
+            ttk.Label(box, text=label + ":", style="ROI.TLabel").grid(
+                row=r, column=0, sticky="w", pady=2
+            )
+            var = tk.StringVar(value="-")
+            ttk.Label(box, textvariable=var, style="ROI.TLabel",
+                      font=(self.font_family, 10, "bold")).grid(
+                          row=r, column=1, sticky="e", padx=(20, 0)
+                      )
+            self.result_vars[key] = var
+
+    def _read(self, fields):
+        values = {}
+        for key, label, typ, default in fields:
+            text = self.entries[key].get().strip()
+            if not text:
+                if default is None:
+                    raise ValueError(f"Missing value: {label}")
+                values[key] = default
+                continue
+            try:
+                values[key] = typ(text)
+            except ValueError:
+                raise ValueError(f"Invalid number for: {label}")
+        return values
+
+    def calculate(self):
+        try:
+            con = self._read(CONVENTIONAL_FIELDS)
+            aut = self._read(AUTONOMY_FIELDS)
+        except ValueError as e:
+            messagebox.showerror("Input error", str(e), parent=self)
+            return
+
+        if not 1 <= aut["dedicatedTimeRaw"] <= 100:
+            messagebox.showerror("Input error", "Supervising time must be between 1 and 100.",
+                                 parent=self)
+            return
+        if aut["autNumMachines"] <= 0:
+            messagebox.showerror("Input error", "Number of machines must be greater than 0.",
+                                 parent=self)
+            return
+        if aut["autMachinesPerOperator"] <= 0:
+            messagebox.showerror("Input error", "Machines per operator must be greater than 0.",
+                                 parent=self)
+            return
+
+        conTotalCost = (con["conEquipCost"] + con["conSubCost"]) * con["conNumMachines"]
+        conLaborCost = con["conNumMachines"] * con["conLaborRate"]
+        autTotalCost = (
+            aut["autEquipCost"] + aut["autRetroCost"] + aut["autSubCost"]
+        ) * aut["autNumMachines"]
+        dedicatedTime = aut["dedicatedTimeRaw"] / 100
+        autLaborCost = (
+            aut["autLaborRate"] * dedicatedTime
+        ) / aut["autMachinesPerOperator"]
+
+        savings = conLaborCost - autLaborCost
+        costdif = autTotalCost - conTotalCost
+
+        self.result_vars["conTotalCost"].set(f"${conTotalCost:,.2f}")
+        self.result_vars["conLaborCost"].set(f"${conLaborCost:,.2f}")
+        self.result_vars["autTotalCost"].set(f"${autTotalCost:,.2f}")
+        self.result_vars["autLaborCost"].set(f"${autLaborCost:,.2f}")
+        self.result_vars["savings"].set(f"${savings:,.2f}")
+
+        if savings <= 0:
+            self.payback_years = None
+            self.result_vars["payback"].set("Never pays back")
+            self.result_vars["paybackWeeks"].set("Never pays back")
+            self.result_vars["paybackYears"].set("Never pays back")
+        else:
+            paybackHours = costdif / savings
+            paybackWeeks = paybackHours / 40
+            self.payback_years = paybackWeeks / 52
+            self.result_vars["payback"].set(f"{paybackHours:,.1f} hours")
+            self.result_vars["paybackWeeks"].set(f"{paybackWeeks:,.1f} weeks")
+            self.result_vars["paybackYears"].set(f"{self.payback_years:,.1f} years")
+
+        if self.on_result:
+            self.on_result(self.payback_years, True)
+
+    def clear(self):
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+        for var in self.result_vars.values():
+            var.set("-")
+        self.payback_years = None
+        if self.on_result:
+            self.on_result(None, False)
+
+
+class DrivabilityInputWindow(tk.Toplevel):
+    def __init__(self, master, image_path, field_area, on_apply):
+        super().__init__(master)
+        self.title("Drivability Inputs")
+        self.geometry("620x250")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.image_path = image_path
+        self.on_apply = on_apply
+
+        header = tk.Frame(self, bg=HEADER)
+        header.pack(fill="x")
+        tk.Label(header, text="Drivability Inputs", font=(FONT, 18, "bold"),
+                 fg="white", bg=HEADER).pack(anchor="w", padx=22, pady=(12, 2))
+        tk.Label(header, text="Choose a field image and enter its size",
+                 font=(FONT, 10), fg=HEADER_SUB, bg=HEADER).pack(
+                     anchor="w", padx=22, pady=(0, 12)
+                 )
+
+        content = tk.Frame(self, bg=BG)
+        content.pack(fill="both", expand=True, padx=20, pady=16)
+        image_row = tk.Frame(content, bg=BG)
+        image_row.pack(fill="x", pady=(0, 14))
+        ttk.Button(image_row, text="Select Field Image...",
+                   style="Secondary.TButton", command=self.select_image).pack(side="left")
+        self.image_var = tk.StringVar(value=self._image_label(image_path))
+        tk.Label(image_row, textvariable=self.image_var, font=(FONT, 10),
+                 fg=MUTED, bg=BG).pack(side="left", padx=12)
+
+        size_row = tk.Frame(content, bg=BG)
+        size_row.pack(fill="x")
+        tk.Label(size_row, text="Field size (acres)", font=(FONT, 10),
+                 fg=TEXT, bg=BG).pack(side="left")
+        self.field_area_entry = ttk.Entry(size_row, width=14)
+        self.field_area_entry.pack(side="left", padx=(10, 0))
+        if field_area is not None:
+            self.field_area_entry.insert(0, str(field_area))
+
+        buttons = tk.Frame(content, bg=BG)
+        buttons.pack(side="right", pady=(16, 0))
+        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
+                   command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Apply", style="Accent.TButton",
+                   command=self.apply).pack(side="left", padx=4)
+
+    @staticmethod
+    def _image_label(image_path):
+        return os.path.basename(image_path) if image_path else "No field image selected"
+
+    def select_image(self):
+        path = filedialog.askopenfilename(
+            title="Select satellite image of field",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.tif *.tiff"),
+                       ("All files", "*.*")],
+            parent=self,
+        )
+        if path:
+            self.image_path = path
+            self.image_var.set(self._image_label(path))
+
+    def apply(self):
+        field_area = None
+        if self.image_path:
+            try:
+                field_area = float(self.field_area_entry.get().strip())
+            except ValueError:
+                messagebox.showerror("Input error", "Enter the field size in acres.",
+                                     parent=self)
+                return
+            if not math.isfinite(field_area) or field_area <= 0:
+                messagebox.showerror("Input error", "Field size must be greater than 0 acres.",
+                                     parent=self)
+                return
+
+        self.on_apply(self.image_path, field_area)
+        self.destroy()
+
+
 class RateOnomyApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -454,6 +775,10 @@ class RateOnomyApp(tk.Tk):
         global FONT
         FONT = pick_font()
         setup_styles(self)
+        self.roi_window = None
+        self.roi_payback_years = None
+        self.roi_calculated = False
+        self.drivability_window = None
 
         # Header banner
         header = tk.Frame(self, bg=HEADER)
@@ -466,16 +791,23 @@ class RateOnomyApp(tk.Tk):
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=20, pady=16)
 
-        # Controls card: image picker on the left, actions on the right
+        # Controls card: input windows on the left, actions on the right
         self.image_path = None
-        self.image_var = tk.StringVar(value="No field image selected")
+        self.field_area = None
+        self.image_var = tk.StringVar(value="")
         controls = make_card(body)
         controls.pack(fill="x")
         cin = tk.Frame(controls, bg=CARD)
         cin.pack(fill="x", padx=16, pady=12)
-        self.pick_btn = ttk.Button(cin, text="Select Field Image...",
-                                   style="Secondary.TButton", command=self.select_image)
-        self.pick_btn.pack(side="left")
+        self.roi_btn = ttk.Button(cin, text="ROI Calculator",
+                      style="Secondary.TButton",
+                      command=self.open_roi_calculator)
+        self.roi_btn.pack(side="left", padx=(0, 8))
+        self.drivability_btn = ttk.Button(
+            cin, text="Drivability Inputs...", style="Secondary.TButton",
+            command=self.open_drivability_inputs,
+        )
+        self.drivability_btn.pack(side="left")
         tk.Label(cin, textvariable=self.image_var, font=(FONT, 10), fg=MUTED,
                  bg=CARD).pack(side="left", padx=12)
         self.run_btn = ttk.Button(cin, text="Run Assessment", style="Accent.TButton",
@@ -553,19 +885,44 @@ class RateOnomyApp(tk.Tk):
             font=(FONT, 9), fg=MUTED, bg=CARD, wraplength=520, justify="left",
         ).pack(anchor="w")
 
-    def select_image(self):
-        path = filedialog.askopenfilename(
-            title="Select satellite image of field",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.tif *.tiff"), ("All files", "*.*")],
+    def open_roi_calculator(self):
+        if self.roi_window is not None and self.roi_window.winfo_exists():
+            self.roi_window.lift()
+            self.roi_window.focus_force()
+            return
+        self.roi_window = ROIApp(
+            self, self._on_roi_result, font_family=FONT
         )
-        if path:
-            self.image_path = path
-            self.image_var.set(os.path.basename(path))
+        self.roi_window.transient(self)
+
+    def _on_roi_result(self, payback_years, calculated):
+        self.roi_payback_years = payback_years
+        self.roi_calculated = calculated
+        if calculated:
+            result = compute_roi_score(payback_years)
+            self.roi_panel.update_result(result, grade_from_score(result["score"]))
+        else:
+            self.roi_panel.clear()
+
+    def open_drivability_inputs(self):
+        if self.drivability_window is not None and self.drivability_window.winfo_exists():
+            self.drivability_window.lift()
+            self.drivability_window.focus_force()
+            return
+        self.drivability_window = DrivabilityInputWindow(
+            self, self.image_path, self.field_area, self._on_drivability_inputs
+        )
+        self.drivability_window.transient(self)
+
+    def _on_drivability_inputs(self, image_path, field_area):
+        self.image_path = image_path
+        self.field_area = field_area
+        self.image_var.set(os.path.basename(image_path) if image_path else "")
 
     def _set_running(self, running):
         self._running = running
         state = "disabled" if running else "normal"
-        for btn in (self.run_btn, self.clear_btn, self.pick_btn):
+        for btn in (self.run_btn, self.clear_btn, self.drivability_btn, self.roi_btn):
             btn.config(state=state)
         if running:
             self.status_frame.pack(side="right", padx=(0, 16))
@@ -579,16 +936,25 @@ class RateOnomyApp(tk.Tk):
     def run_assessment(self):
         if self._running:
             return
+        if not self.roi_calculated:
+            messagebox.showerror(
+                "ROI required",
+                "Open the ROI Calculator and click Calculate before running the assessment.",
+            )
+            return
+        image_path = self.image_path
+        roi_payback_years = self.roi_payback_years
+        field_area = self.field_area
+
         self._set_running(True)
         self._outcome = {}
-        image_path = self.image_path
 
         def work():
             # Runs off the UI thread so the spinner keeps animating.
             # Do not touch any tkinter widgets in here.
             try:
-                self._outcome["roi"] = compute_roi_score()
-                self._outcome["driv"] = compute_drivability_score(image_path)
+                self._outcome["roi"] = compute_roi_score(roi_payback_years)
+                self._outcome["driv"] = compute_drivability_score(image_path, field_area)
                 self._outcome["legal"] = compute_legal_score()
             except Exception as exc:
                 self._outcome["error"] = exc
@@ -625,6 +991,15 @@ class RateOnomyApp(tk.Tk):
         self.feasibility_label.config(text=f"  {feasible}  ", bg=pill_color)
 
     def clear(self):
+        self.image_path = None
+        self.field_area = None
+        self.image_var.set("")
+        if self.drivability_window is not None and self.drivability_window.winfo_exists():
+            self.drivability_window.destroy()
+        if self.roi_window is not None and self.roi_window.winfo_exists():
+            self.roi_window.clear()
+        else:
+            self._on_roi_result(None, False)
         for panel in (self.roi_panel, self.driv_panel, self.legal_panel):
             panel.clear()
         self.composite_label.config(text="--", fg=PENDING)
