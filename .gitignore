@@ -5,3 +5,6 @@ build/
 dist/
 rateonomy-0.0.1.spec
 app.py
+.vscode/settings.json
+__pycache__/pipeline_b.cpython-313.pyc
+__pycache__/schema.cpython-313.pyc

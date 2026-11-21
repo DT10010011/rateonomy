@@ -64,8 +64,9 @@ def compute_roi_score(payback_years=None):
         payback_label = "Never pays back"
     else:
         ratings = [
-            (9, 10), (8, 9), (7, 8), (6, 7), (5, 6),
-            (4, 5), (3, 4), (2, 3), (1.5, 2), (1,1)
+            (9, 1), (8, 2), (7, 3), (6, 4), (5, 5),
+            (4, 6), (3, 7), (2, 8), (1.5, 9), (1,10)
+           
         ]
         score = 1
         if payback_years > 0.5:
