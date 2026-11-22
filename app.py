@@ -255,6 +255,38 @@ def compute_drivability_score(image_path=None, field_area=None):
     }
 
 
+def compute_drivability_score_for_fields(fields):
+    """Score each field independently and combine scores by field area."""
+    if not fields:
+        return compute_drivability_score()
+
+    results = [
+        compute_drivability_score(field["image_path"], field["field_area"])
+        for field in fields
+    ]
+    total_area = sum(field["field_area"] for field in fields)
+    weighted_score = sum(
+        result["score"] * field["field_area"]
+        for field, result in zip(fields, results)
+    ) / total_area
+    details = [
+        ("Fields analyzed", str(len(fields))),
+        ("Combination method", "Area-weighted average"),
+    ]
+    for index, result in enumerate(results, start=1):
+        details.append((f"Field {index} score", f"{result['score']:.1f} / 10"))
+        details.extend(
+            (f"Field {index} {label}", value)
+            for label, value in result["details"]
+        )
+
+    return {
+        "score": round(weighted_score, 1),
+        "summary": f"Area-weighted drivability score across {len(fields)} fields.",
+        "details": details,
+    }
+
+
 FEASIBILITY_DISPLAY = {
     "PERMITTED": ("Workable", "Legally feasible"),
     "CONDITIONAL": ("Conditional", "Restricted — conditions apply"),
@@ -604,6 +636,7 @@ class ROIApp(tk.Toplevel):
         self.payback_years = None
         self.on_result = on_result
         self.font_family = font_family
+        self.protocol("WM_DELETE_WINDOW", self.withdraw)
         self._setup_styles()
 
         header = tk.Frame(self, bg=HEADER)
@@ -625,12 +658,10 @@ class ROIApp(tk.Toplevel):
 
         btns = tk.Frame(frame, bg=BG)
         btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
-        ttk.Button(btns, text="Calculate", style="ROI.Accent.TButton",
-                   command=self.calculate).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", style="ROI.Secondary.TButton",
                    command=self.clear).pack(side="left", padx=4)
-        ttk.Button(btns, text="Done", style="ROI.Secondary.TButton",
-                   command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(btns, text="Apply", style="ROI.Accent.TButton",
+                   command=self.apply).pack(side="right", padx=4)
 
     def _setup_styles(self):
         style = ttk.Style(self)
@@ -706,20 +737,20 @@ class ROIApp(tk.Toplevel):
             aut = self._read(AUTONOMY_FIELDS)
         except ValueError as e:
             messagebox.showerror("Input error", str(e), parent=self)
-            return
+            return False
 
         if not 1 <= aut["dedicatedTimeRaw"] <= 100:
             messagebox.showerror("Input error", "Supervising time must be between 1 and 100.",
                                  parent=self)
-            return
+            return False
         if aut["autNumMachines"] <= 0:
             messagebox.showerror("Input error", "Number of machines must be greater than 0.",
                                  parent=self)
-            return
+            return False
         if aut["autMachinesPerOperator"] <= 0:
             messagebox.showerror("Input error", "Machines per operator must be greater than 0.",
                                  parent=self)
-            return
+            return False
 
         conTotalCost = (con["conEquipCost"] + con["conSubCost"]) * con["conNumMachines"]
         conLaborCost = con["conNumMachines"] * con["conLaborRate"]
@@ -755,6 +786,11 @@ class ROIApp(tk.Toplevel):
 
         if self.on_result:
             self.on_result(self.payback_years, True)
+        return True
+
+    def apply(self):
+        if self.calculate():
+            self.withdraw()
 
     def clear(self):
         for entry in self.entries.values():
@@ -767,55 +803,127 @@ class ROIApp(tk.Toplevel):
 
 
 class DrivabilityInputWindow(tk.Toplevel):
-    def __init__(self, master, image_path, field_area, on_apply):
+    def __init__(self, master, fields, on_apply):
         super().__init__(master)
         self.title("Drivability Inputs")
-        self.geometry("620x250")
-        self.resizable(False, False)
+        self.geometry("720x520")
+        self.minsize(620, 360)
         self.configure(bg=BG)
-        self.image_path = image_path
         self.on_apply = on_apply
+        self.fields = []
 
         header = tk.Frame(self, bg=HEADER)
         header.pack(fill="x")
         tk.Label(header, text="Drivability Inputs", font=(FONT, 18, "bold"),
                  fg="white", bg=HEADER).pack(anchor="w", padx=22, pady=(12, 2))
-        tk.Label(header, text="Choose a field image and enter its size",
+        tk.Label(header, text="Add field images and enter each field's size",
                  font=(FONT, 10), fg=HEADER_SUB, bg=HEADER).pack(
                      anchor="w", padx=22, pady=(0, 12)
                  )
 
-        content = tk.Frame(self, bg=BG)
-        content.pack(fill="both", expand=True, padx=20, pady=16)
-        image_row = tk.Frame(content, bg=BG)
-        image_row.pack(fill="x", pady=(0, 14))
-        ttk.Button(image_row, text="Select Field Image...",
-                   style="Secondary.TButton", command=self.select_image).pack(side="left")
-        self.image_var = tk.StringVar(value=self._image_label(image_path))
-        tk.Label(image_row, textvariable=self.image_var, font=(FONT, 10),
-                 fg=MUTED, bg=BG).pack(side="left", padx=12)
+        toolbar = tk.Frame(self, bg=BG)
+        toolbar.pack(fill="x", padx=20, pady=(14, 8))
+        ttk.Button(toolbar, text="Add Field", style="Secondary.TButton",
+                   command=self.add_field).pack(side="left")
 
-        size_row = tk.Frame(content, bg=BG)
-        size_row.pack(fill="x")
-        tk.Label(size_row, text="Field size (acres)", font=(FONT, 10),
-                 fg=TEXT, bg=BG).pack(side="left")
-        self.field_area_entry = ttk.Entry(size_row, width=14)
-        self.field_area_entry.pack(side="left", padx=(10, 0))
-        if field_area is not None:
-            self.field_area_entry.insert(0, str(field_area))
+        list_container = tk.Frame(self, bg=BG)
+        list_container.pack(fill="both", expand=True, padx=20)
+        canvas = tk.Canvas(list_container, bg=BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical",
+                                  command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.fields_frame = tk.Frame(canvas, bg=BG)
+        self.fields_window = canvas.create_window(
+            (0, 0), window=self.fields_frame, anchor="nw"
+        )
+        self.fields_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                self.fields_window, width=event.width
+            ),
+        )
 
-        buttons = tk.Frame(content, bg=BG)
-        buttons.pack(side="right", pady=(16, 0))
+        buttons = tk.Frame(self, bg=BG)
+        buttons.pack(side="bottom", fill="x", padx=20, pady=14)
         ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
                    command=self.destroy).pack(side="left", padx=4)
         ttk.Button(buttons, text="Apply", style="Accent.TButton",
-                   command=self.apply).pack(side="left", padx=4)
+                   command=self.apply).pack(side="right", padx=4)
+
+        for field in fields:
+            self.add_field(field["image_path"], field["field_area"])
+        if not self.fields:
+            self.add_field()
 
     @staticmethod
     def _image_label(image_path):
         return os.path.basename(image_path) if image_path else "No field image selected"
 
-    def select_image(self):
+    def add_field(self, image_path=None, field_area=None):
+        row = tk.Frame(self.fields_frame, bg=CARD, padx=12, pady=8)
+        row.pack(fill="x", pady=4)
+        heading = tk.Frame(row, bg=CARD)
+        heading.pack(fill="x")
+        number_label = tk.Label(
+            heading, text="", font=(FONT, 10, "bold"), fg=TEXT, bg=CARD
+        )
+        number_label.pack(side="left", padx=(0, 10))
+        image_var = tk.StringVar(value=self._image_label(image_path))
+        ttk.Button(
+            heading,
+            text="Select Image...",
+            style="Secondary.TButton",
+            command=lambda: self.select_image(field),
+        ).pack(side="left")
+        tk.Label(heading, textvariable=image_var, font=(FONT, 9),
+                 fg=MUTED, bg=CARD).pack(side="left", padx=10, fill="x", expand=True)
+        ttk.Button(
+            heading,
+            text="Remove",
+            style="Secondary.TButton",
+            command=lambda: self.remove_field(field),
+        ).pack(side="right")
+
+        area_row = tk.Frame(row, bg=CARD)
+        area_row.pack(fill="x", pady=(8, 0))
+        tk.Label(area_row, text="Field size (acres)", font=(FONT, 10),
+                 fg=TEXT, bg=CARD).pack(side="left")
+        area_entry = ttk.Entry(area_row, width=14)
+        area_entry.pack(side="left", padx=(10, 0))
+        if field_area is not None:
+            area_entry.insert(0, str(field_area))
+
+        field = {
+            "frame": row,
+            "path": image_path,
+            "number_label": number_label,
+            "image_var": image_var,
+            "area_entry": area_entry,
+        }
+        self.fields.append(field)
+        self._renumber_fields()
+
+    def remove_field(self, field):
+        if len(self.fields) == 1:
+            field["path"] = None
+            field["image_var"].set(self._image_label(None))
+            field["area_entry"].delete(0, tk.END)
+        else:
+            self.fields.remove(field)
+            field["frame"].destroy()
+        self._renumber_fields()
+
+    def _renumber_fields(self):
+        for index, field in enumerate(self.fields, start=1):
+            field["number_label"].config(text=f"Field {index}")
+
+    def select_image(self, field):
         path = filedialog.askopenfilename(
             title="Select satellite image of field",
             filetypes=[("Images", "*.png *.jpg *.jpeg *.tif *.tiff"),
@@ -823,24 +931,42 @@ class DrivabilityInputWindow(tk.Toplevel):
             parent=self,
         )
         if path:
-            self.image_path = path
-            self.image_var.set(self._image_label(path))
+            field["path"] = path
+            field["image_var"].set(self._image_label(path))
 
     def apply(self):
-        field_area = None
-        if self.image_path:
+        selected_fields = []
+        for index, field in enumerate(self.fields, start=1):
+            area_text = field["area_entry"].get().strip()
+            if not field["path"] and not area_text:
+                continue
+            if not field["path"]:
+                messagebox.showerror(
+                    "Input error", f"Select an image for Field {index}.", parent=self
+                )
+                return
             try:
-                field_area = float(self.field_area_entry.get().strip())
+                field_area = float(area_text)
             except ValueError:
-                messagebox.showerror("Input error", "Enter the field size in acres.",
-                                     parent=self)
+                messagebox.showerror(
+                    "Input error",
+                    f"Enter the field size in acres for Field {index}.",
+                    parent=self,
+                )
                 return
             if not math.isfinite(field_area) or field_area <= 0:
-                messagebox.showerror("Input error", "Field size must be greater than 0 acres.",
-                                     parent=self)
+                messagebox.showerror(
+                    "Input error",
+                    f"Field {index} size must be greater than 0 acres.",
+                    parent=self,
+                )
                 return
+            selected_fields.append({
+                "image_path": field["path"],
+                "field_area": field_area,
+            })
 
-        self.on_apply(self.image_path, field_area)
+        self.on_apply(selected_fields)
         self.destroy()
 
 class LegalInputWindow(tk.Toplevel):
@@ -1035,8 +1161,7 @@ class RateOnomyApp(tk.Tk):
         body.pack(fill="both", expand=True, padx=20, pady=16)
 
         # Controls card: input windows on the left, actions on the right
-        self.image_path = None
-        self.field_area = None
+        self.drivability_fields = []
         self.image_var = tk.StringVar(value="")
         controls = make_card(body)
         controls.pack(fill="x")
@@ -1135,6 +1260,7 @@ class RateOnomyApp(tk.Tk):
 
     def open_roi_calculator(self):
         if self.roi_window is not None and self.roi_window.winfo_exists():
+            self.roi_window.deiconify()
             self.roi_window.lift()
             self.roi_window.focus_force()
             return
@@ -1158,14 +1284,15 @@ class RateOnomyApp(tk.Tk):
             self.drivability_window.focus_force()
             return
         self.drivability_window = DrivabilityInputWindow(
-            self, self.image_path, self.field_area, self._on_drivability_inputs
+            self, self.drivability_fields, self._on_drivability_inputs
         )
         self.drivability_window.transient(self)
 
-    def _on_drivability_inputs(self, image_path, field_area):
-        self.image_path = image_path
-        self.field_area = field_area
-        self.image_var.set(os.path.basename(image_path) if image_path else "")
+    def _on_drivability_inputs(self, fields):
+        self.drivability_fields = fields
+        self.image_var.set(
+            f"{len(fields)} field image(s) selected" if fields else ""
+        )
 
     def open_legal_inputs(self):
         if self.legal_window is not None and self.legal_window.winfo_exists():
@@ -1206,7 +1333,7 @@ class RateOnomyApp(tk.Tk):
         if not self.roi_calculated:
             messagebox.showerror(
                 "ROI required",
-                "Open the ROI Calculator and click Calculate before running the assessment.",
+                "Open the ROI Calculator and click Apply before running the assessment.",
             )
             return
         if self.legal_profile is None:
@@ -1215,9 +1342,8 @@ class RateOnomyApp(tk.Tk):
                 "Open 'Legal Inputs...' and click Apply before running the assessment.",
             )
             return
-        image_path = self.image_path
         roi_payback_years = self.roi_payback_years
-        field_area = self.field_area
+        drivability_fields = list(self.drivability_fields)
         legal_profile = self.legal_profile
 
         self._set_running(True)
@@ -1228,7 +1354,9 @@ class RateOnomyApp(tk.Tk):
             # Do not touch any tkinter widgets in here.
             try:
                 self._outcome["roi"] = compute_roi_score(roi_payback_years)
-                self._outcome["driv"] = compute_drivability_score(image_path, field_area)
+                self._outcome["driv"] = compute_drivability_score_for_fields(
+                    drivability_fields
+                )
                 self._outcome["legal"] = compute_legal_score(legal_profile)
             except Exception as exc:
                 self._outcome["error"] = exc
@@ -1275,8 +1403,7 @@ class RateOnomyApp(tk.Tk):
         self.feasibility_label.config(text=f"  {feasible}  ", bg=pill_color)
 
     def clear(self):
-        self.image_path = None
-        self.field_area = None
+        self.drivability_fields = []
         self.image_var.set("")
         if self.drivability_window is not None and self.drivability_window.winfo_exists():
             self.drivability_window.destroy()
