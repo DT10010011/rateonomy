@@ -1,0 +1,378 @@
+{
+  "schema_version": "1.0",
+  "last_updated": "2026-11-14",
+  "rules": [
+    {
+      "rule_id": "CA-CCR-T8-3441B",
+      "jurisdiction": "CA",
+      "category": "in_field_supervision",
+      "citation": "Cal. Code Regs. tit. 8, § 3441(b) & § 3441(b)(1)",
+      "title": "Operator Required at Vehicular Controls When Employees Are Exposed",
+      "legal_status": "ENACTED",
+      "effective_date": "1977-06-12",
+      "source_url": "https://www.dir.ca.gov/title8/3441.html",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": null,
+        "requires_employee_exposure": true,
+        "blocked_supervision_modes": [
+          "on_site_line_of_sight",
+          "remote_monitoring",
+          "fully_unattended"
+        ],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Where employees are present or have predictable access to the operational zone of danger, Cal/OSHA Title 8 § 3441(b) requires an operator stationed at the vehicular controls (or immediate access to controls under 2 mph for furrow-guided vehicles per § 3441(b)(1)). Autonomous AI/computer control without an operator is prohibited when workers are exposed.",
+      "operational_workaround": "Station a human operator at the controls, or physically isolate and restrict the field so zero employees are present or able to access the zone of danger during autonomous operation (per Cal/OSHA Memo Aug. 30, 2024, § 2.2).",
+      "roi_impact": {
+        "min_supervision_pct_override": 100,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "CA-CALOSHA-MEMO-20240830",
+      "jurisdiction": "CA",
+      "category": "in_field_supervision",
+      "citation": "Cal/OSHA Memorandum (Aug. 30, 2024), § 2.2; OSHAB Exposure Doctrine",
+      "title": "Zero-Employee-Exposure Carve-Out for Autonomous Agricultural Vehicles",
+      "legal_status": "AGENCY_GUIDANCE",
+      "effective_date": "2024-08-30",
+      "source_url": "https://www.dir.ca.gov/oshsb/documents/CalOSHA-Memo-Request-for-Advisory-Committee-AC-2.pdf",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": null,
+        "requires_employee_exposure": false,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Per Cal/OSHA's August 30, 2024 memorandum (§ 2.2) and OSHAB case law, autonomous agricultural vehicle operation does not violate Title 8 § 3441 if there are no employees at the worksite and no predictable employee access (including by inadvertence or ingress/egress) to the zone of danger. Note: Monarch Tractor's 2021 five-year experimental variance lapsed in August 2026, and no general variance applies if workers enter the area.",
+      "operational_workaround": "Maintain strict perimeter access controls, locked gates, and geofenced buffer zones ensuring no employees enter or approach the active field while autonomous equipment is running.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "CA-OSHSB-PETITION-596",
+      "jurisdiction": "CA",
+      "category": "in_field_supervision",
+      "citation": "Cal/OSHA Standards Board Petition File No. 596",
+      "title": "Proposed Amendment to Permit Driver-Optional Autonomous Tractors",
+      "legal_status": "PROPOSED_OR_PETITION",
+      "effective_date": null,
+      "source_url": "https://www.dir.ca.gov/oshsb/petition-596.html",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-14",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": null,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Pending rulemaking petition to allow driver-optional tractors without an operator at the controls. Not enacted law; does not authorize autonomous operation.",
+      "operational_workaround": null,
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": false
+      }
+    },
+    {
+      "rule_id": "CA-DMV-CCR-T13-227-28",
+      "jurisdiction": "CA",
+      "category": "public_road_transit",
+      "citation": "Cal. Veh. Code § 38750; Cal. Code Regs. tit. 13, § 227.28 & § 228.04",
+      "title": "CA DMV Autonomous Vehicle Public Road Permit & Heavy/Agricultural Vehicle Exclusion",
+      "legal_status": "ENACTED",
+      "effective_date": "2018-04-02",
+      "source_url": "https://www.dmv.ca.gov/portal/vehicle-industry-services/autonomous-vehicles/",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [
+          "on_site_line_of_sight",
+          "remote_monitoring",
+          "fully_unattended"
+        ],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Operating an autonomous vehicle on California public roads without a driver at the controls requires a CA DMV Autonomous Vehicle Deployment or Driverless Testing Permit within an approved Operational Design Domain (ODD). Furthermore, 13 CCR § 227.28 excludes vehicles with a GVWR of 10,001 lbs or more and implements of husbandry from standard DMV autonomous permits, prohibiting driverless road transit of autonomous tractors.",
+      "operational_workaround": "Do not operate the tractor autonomously on public roads; transport the machine between fields on a human-driven flatbed trailer or have a human operator manually drive it on public roadways.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "CA-CVC-DIV16-ROAD",
+      "jurisdiction": "CA",
+      "category": "public_road_transit",
+      "citation": "Cal. Veh. Code §§ 36000–36800 (Division 16: Implements of Husbandry)",
+      "title": "Human Driver Control & Lighting/Width Requirements for Implements of Husbandry on Highways",
+      "legal_status": "ENACTED",
+      "effective_date": "1963-09-20",
+      "source_url": "https://leginfo.legislature.ca.gov/faces/codes_displayexpandedbranch.xhtml?tocCode=VEH&division=16.",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [
+          "on_site_line_of_sight",
+          "remote_monitoring",
+          "fully_unattended"
+        ],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Implements of husbandry (farm tractors and towed field equipment) moving on California public highways must be operated by a human driver in control of the vehicle and display required slow-moving vehicle emblems and lighting.",
+      "operational_workaround": "Switch to manual human operation at the field gate before entering any public road, or haul equipment via commercial truck/trailer.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "FED-OSHA-CPL-02-00-051",
+      "jurisdiction": "FEDERAL",
+      "category": "osha_exemption",
+      "citation": "OSHA Directive CPL 02-00-051 (Appropriations Act Exemption)",
+      "title": "Small Farming Operation Enforcement Exemption",
+      "legal_status": "ENACTED",
+      "effective_date": "1998-05-28",
+      "source_url": "https://www.osha.gov/enforcement/directives/cpl-02-00-051",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-14",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": null,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "In states without a private-sector OSHA State Plan (including Illinois), private farms employing 10 or fewer non-family workers and maintaining no temporary labor camp within the past 12 months are exempt from federal OSHA enforcement activity.",
+      "operational_workaround": "Keep non-family headcount at 10 or fewer and avoid operating a temporary labor camp to maintain federal OSHA enforcement exemption in Illinois.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": false
+      }
+    },
+    {
+      "rule_id": "IL-IVC-625-5-11-1418",
+      "jurisdiction": "IL",
+      "category": "public_road_transit",
+      "citation": "625 ILCS 5/11-1418",
+      "title": "Regulation of Farm Tractors on Public Highways",
+      "legal_status": "ENACTED",
+      "effective_date": "1970-07-01",
+      "source_url": "https://ilga.gov/documents/legislation/ilcs/documents/062500050K11-1418.htm",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-14",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "blocked_supervision_modes": [
+          "on_site_line_of_sight",
+          "remote_monitoring",
+          "fully_unattended"
+        ],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Farm tractors operating on Illinois highways as implements of husbandry require a human operator controlling the vehicle and compliance with slow-moving vehicle/width regulations; unattended autonomous road transit is not authorized.",
+      "operational_workaround": "Have a licensed operator manually drive the tractor between fields on public roads, or haul it on a trailer, switching to autonomous mode only inside field boundaries.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "IA-OSHA-STATE-PLAN-1928",
+      "jurisdiction": "IA",
+      "category": "in_field_supervision",
+      "citation": "Iowa Code Ch. 88; Iowa Admin. Code r. 875-28.1 (29 CFR Part 1928)",
+      "title": "Iowa OSHA State Plan Agricultural Machinery Safety Standards",
+      "legal_status": "ENACTED",
+      "effective_date": "1985-07-02",
+      "source_url": "https://www.osha.gov/stateplans/ia",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": null,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Iowa operates an OSHA-approved State Plan (Iowa OSHA) adopting federal agricultural equipment guarding and safety rules (29 CFR Part 1928). Unlike California, Iowa has no statute or rule requiring a human operator at the controls inside private field boundaries, so autonomous field operation is permitted provided standard machine guarding and worker safety rules are met.",
+      "operational_workaround": "Ensure PTO/moving-part guards and geofenced worker-safety zones comply with Iowa OSHA agricultural standards.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": false
+      }
+    },
+    {
+      "rule_id": "IA-CODE-321-383-453",
+      "jurisdiction": "IA",
+      "category": "public_road_transit",
+      "citation": "Iowa Code §§ 321.383, 321.453; Iowa DOT Farm Guidance",
+      "title": "Iowa Implement of Husbandry Highway Operation, 35 MPH Cap & Operator Requirement",
+      "legal_status": "ENACTED",
+      "effective_date": "2023-07-01",
+      "source_url": "https://www.legis.iowa.gov/docs/code/321.383.pdf",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [
+          "on_site_line_of_sight",
+          "remote_monitoring",
+          "fully_unattended"
+        ],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Iowa has not enacted driverless roadway authorization for agricultural equipment. Under Iowa Code §§ 321.383 and 321.453, implements of husbandry operating on non-interstate highways must display slow-moving vehicle emblems/amber flashing lights, travel at 35 mph or less, and be operated by a human driver (requiring a Class C license if traveling more than 2 miles from the farm site).",
+      "operational_workaround": "Manually drive the tractor between fields on public roads or transport it via trailer, engaging autonomous mode only inside field boundaries.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "TX-TRANSP-545-454-AV",
+      "jurisdiction": "TX",
+      "category": "public_road_transit",
+      "citation": "Tex. Transp. Code §§ 545.451–545.456; 43 Tex. Admin. Code Ch. 220",
+      "title": "Texas Automated Motor Vehicle Highway Operation & Title/Registration Prerequisites",
+      "legal_status": "ENACTED",
+      "effective_date": "2026-02-27",
+      "source_url": "https://www.txdmv.gov/AVprogram",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [
+          "on_site_line_of_sight",
+          "remote_monitoring",
+          "fully_unattended"
+        ],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "While Texas Transportation Code § 545.454 permits automated motor vehicles to operate on public roads without a licensed human driver when an Automated Driving System is engaged, § 545.455(b) and 43 TAC Ch. 220 (effective Feb. 27, 2026) require the vehicle to be titled and registered in Texas, carry motor vehicle liability insurance, have a collision data recorder, and hold TxDMV authorization if transporting property commercially. Unregistered implements of husbandry (farm tractors under § 541.201) do not satisfy these motor-vehicle registration prerequisites for driverless highway transit.",
+      "operational_workaround": "Use a human operator to drive the tractor across/along public roads between fields, or haul the equipment on a registered flatbed truck/trailer.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": true
+      }
+    },
+    {
+      "rule_id": "TX-TRANSP-622-901-ROAD",
+      "jurisdiction": "TX",
+      "category": "public_road_transit",
+      "citation": "Tex. Transp. Code §§ 541.201, 547.703, 622.901",
+      "title": "Texas Farm Tractor & Implement of Husbandry Highway Width and Slow-Moving Vehicle Rules",
+      "legal_status": "ENACTED",
+      "effective_date": "1995-09-01",
+      "source_url": "https://codes.findlaw.com/tx/transportation-code/transp-sect-622-901/",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Farm tractors and implements of husbandry moving temporarily on Texas highways (non-interstate, or up to 50 miles on interstates during agricultural operations per § 622.901) are exempt from standard width limits but must display a slow-moving vehicle emblem (§ 547.703) and required lighting.",
+      "operational_workaround": "Ensure slow-moving vehicle emblems and hazard lighting are active whenever moving equipment between fields on Texas roadways.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": false
+      }
+    },
+    {
+      "rule_id": "AZ-ADOSH-29CFR1928",
+      "jurisdiction": "AZ",
+      "category": "in_field_supervision",
+      "citation": "A.R.S. §§ 23-401 to 23-433; Ariz. Admin. Code R20-5-602 (29 CFR Part 1928)",
+      "title": "Arizona ADOSH State Plan Agricultural Equipment Safety Standards",
+      "legal_status": "ENACTED",
+      "effective_date": "1985-06-20",
+      "source_url": "https://www.osha.gov/stateplans/az",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": null,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Arizona operates an OSHA-approved State Plan (ADOSH) adopting federal agricultural equipment safety standards (29 CFR Part 1928). Arizona has no California-style requirement for a human operator stationed at the controls inside private field boundaries, so autonomous field operation is permitted across all supervision modes.",
+      "operational_workaround": "Maintain standard PTO/moving-part guards and geofenced worker-safety perimeters in compliance with ADOSH agricultural standards.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": false
+      }
+    },
+    {
+      "rule_id": "AZ-ARS-28-101-SB1320",
+      "jurisdiction": "AZ",
+      "category": "public_road_transit",
+      "citation": "A.R.S. § 28-101(40) (as amended by SB 1320, Laws 2025, Ch. 19); A.R.S. §§ 28-9701 to 28-9705",
+      "title": "Arizona Autonomous Implement of Husbandry Public Highway Transit Authorization",
+      "legal_status": "ENACTED",
+      "effective_date": "2025-09-26",
+      "source_url": "https://www.azleg.gov/legtext/57Leg/1R/laws/0019.pdf",
+      "verified": true,
+      "verified_by": "Jeff Hank",
+      "verified_date": "2026-11-15",
+      "applicability": {
+        "activities": ["ALL"],
+        "equipment_types": ["ALL"],
+        "requires_public_road_transit": true,
+        "requires_employee_exposure": null,
+        "blocked_supervision_modes": [],
+        "requires_osha_enforcement": false
+      },
+      "constraint_summary": "Under A.R.S. § 28-101(40) (SB 1320, effective Sept. 26, 2025), Arizona explicitly defines 'implement of husbandry' to include agricultural vehicles and implements equipped with an active Automated Driving System (ADS) or autonomous operation. Equipment used solely for agricultural purposes may be incidentally operated or moved on a public highway between fields or farm sites without an onboard human driver or standard motor-vehicle registration, provided it complies with implement-of-husbandry lighting, slow-moving vehicle signage, and minimal-risk-condition fail-safe requirements.",
+      "operational_workaround": "Ensure slow-moving vehicle emblems, hazard lighting, and automated minimal-risk-condition stop protocols are active during public road crossings or transit between fields.",
+      "roi_impact": {
+        "min_supervision_pct_override": null,
+        "requires_human_road_transport": false
+      }
+    }
+  ]
+}
