@@ -8,14 +8,55 @@ import os
 import math
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, font as tkfont
+from tkinter import ttk, filedialog, messagebox, font as tkfont, simpledialog
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv, set_key
 from PIL import Image, ImageDraw, ImageChops, ImageFont, ImageTk
 from inference_sdk import InferenceHTTPClient, InferenceConfiguration
+from pipeline_b import PipelineBResult, evaluate_regulatory_compliance
+from schema import FarmerProfile
 
-# Load ROBOFLOW_API_KEY from a .env file next to this script
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+CORPUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regulatory_corpus.json")
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(ENV_PATH)
+
+
+def prompt_for_api_keys():
+    if not os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "w", encoding="utf-8") as env_file:
+            env_file.write("ROBOFLOW_API_KEY=NONE\nGEMINI_API_KEY=NONE\n")
+
+    for key_name, provider in (
+        ("ROBOFLOW_API_KEY", "Roboflow"),
+        ("GEMINI_API_KEY", "Gemini"),
+    ):
+        key_value = dotenv_values(ENV_PATH).get(key_name)
+        if not key_value or not key_value.strip():
+            success, _, _ = set_key(ENV_PATH, key_name, "NONE")
+            if not success:
+                raise OSError(f"Could not save {key_name} to {ENV_PATH}.")
+            key_value = "NONE"
+        if key_value.strip() != "NONE":
+            continue
+
+        dialog_root = tk.Tk()
+        dialog_root.withdraw()
+        try:
+            api_key = simpledialog.askstring(
+                f"{provider} API Key",
+                f"Enter your {provider} API key:",
+                parent=dialog_root,
+                show="*",
+            )
+        finally:
+            dialog_root.destroy()
+
+        if api_key and api_key.strip():
+            api_key = api_key.strip()
+            success, _, _ = set_key(ENV_PATH, key_name, api_key)
+            if not success:
+                raise OSError(f"Could not save {key_name} to {ENV_PATH}.")
+            os.environ[key_name] = api_key
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -61,8 +102,9 @@ def compute_roi_score(payback_years=None):
         payback_label = "Never pays back"
     else:
         ratings = [
-            (9, 10), (8, 9), (7, 8), (6, 7), (5, 6),
-            (4, 5), (3, 4), (2, 3), (1.5, 2), (1,1)
+            (9, 1), (8, 2), (7, 3), (6, 4), (5, 5),
+            (4, 6), (3, 7), (2, 8), (1.5, 9), (1,10)
+           
         ]
         score = 1
         if payback_years > 0.5:
@@ -213,18 +255,55 @@ def compute_drivability_score(image_path=None, field_area=None):
     }
 
 
-def compute_legal_score(location=None, equipment=None):
-    """Return dict with legal score (0-10), letter grade, and feasibility."""
-    # TODO: query curated regulatory database
-    return {
-        "score": 10.0,
-        "grade": "A",
-        "label": "Workable",
-        "feasible": "Legally feasible",
-        "summary": "Dummy legal score (regulatory database not yet built).",
-        "details": [("Restrictions", "None (dummy)")],
-    }
+FEASIBILITY_DISPLAY = {
+    "PERMITTED": ("Workable", "Legally feasible"),
+    "CONDITIONAL": ("Conditional", "Restricted — conditions apply"),
+    "PROHIBITED": ("Prohibited", "Prohibited under current rules"),
+}
 
+
+def compute_legal_score(farmer_profile: FarmerProfile | None = None):
+    """Run Pipeline B and adapt PipelineBResult to app.py's 0-10 panel contract."""
+    if farmer_profile is None:
+        raise ValueError("Open 'Legal Inputs...' and apply your farm profile before running.")
+
+    res: PipelineBResult = evaluate_regulatory_compliance(
+        farmer=farmer_profile,
+        corpus_path=CORPUS_PATH,
+    )
+
+    label, feasible_text = FEASIBILITY_DISPLAY[res.feasibility]
+    citations_str = ", ".join(res.applicable_citations) if res.applicable_citations else "None"
+    road_req = "Yes" if res.roi_handoff.requires_human_road_transport else "No"
+    sup_floor = (
+        f"{res.roi_handoff.min_supervision_pct_override}%"
+        if res.roi_handoff.min_supervision_pct_override is not None
+        else "None"
+    )
+
+    citations_count = (
+        f"{len(res.applicable_citations)} rule(s)"
+        if res.applicable_citations
+        else "None"
+    )
+
+    details = [
+        ("State / Activity", f"{farmer_profile.state} ({farmer_profile.activity})"),
+        ("OSHA Small-Farm Exempt", "Yes" if res.osha_small_farm_exempt else "No"),
+        ("Triggered Statutes", citations_count),
+        ("Human Road Driver Req.", road_req),
+        ("Min Supervision Floor", sup_floor),
+    ]
+
+    return {
+        "score": round(res.numeric_score / 10.0, 1),  # Convert 0-100 scale to 0-10
+        "grade": res.letter_grade,
+        "label": label,
+        "feasible": feasible_text,
+        "summary": res.headline_summary,
+        "details": details,
+        "full_result": res,  # Preserved for the "View Legal Report..." popup
+    }
 
 def compute_composite(roi, drivability, legal):
     return (
@@ -764,6 +843,167 @@ class DrivabilityInputWindow(tk.Toplevel):
         self.on_apply(self.image_path, field_area)
         self.destroy()
 
+class LegalInputWindow(tk.Toplevel):
+    """Modal dialog collecting the 8 FarmerProfile inputs for Pipeline B."""
+
+    def __init__(self, master, current_profile: FarmerProfile | None, on_apply):
+        super().__init__(master)
+        self.title("Legal & Regulatory Inputs")
+        self.geometry("640x430")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.on_apply = on_apply
+
+        header = tk.Frame(self, bg=HEADER)
+        header.pack(fill="x")
+        tk.Label(header, text="Legal & Regulatory Inputs", font=(FONT, 18, "bold"),
+                 fg="white", bg=HEADER).pack(anchor="w", padx=22, pady=(12, 2))
+        tk.Label(header, text="Provide operation details to evaluate state & federal rules",
+                 font=(FONT, 10), fg=HEADER_SUB, bg=HEADER).pack(
+                     anchor="w", padx=22, pady=(0, 12)
+                 )
+
+        p = current_profile
+        self.state_var = tk.StringVar(value=p.state if p else "IL")
+        self.activity_var = tk.StringVar(value=p.activity if p else "tillage")
+        self.equipment_var = tk.StringVar(value=p.equipment_type if p else "autonomous_tractor")
+        self.supervision_var = tk.StringVar(value=p.supervision_mode if p else "remote_monitoring")
+        self.employees_var = tk.StringVar(value=str(p.non_family_employees) if p else "4")
+        self.road_var = tk.BooleanVar(value=p.public_road_transit if p else True)
+        self.camp_var = tk.BooleanVar(value=p.temporary_labor_camp if p else False)
+        self.exposure_var = tk.BooleanVar(value=p.employee_zone_exposure if p else True)
+
+        content = tk.Frame(self, bg=BG)
+        content.pack(fill="both", expand=True, padx=22, pady=16)
+        content.columnconfigure(1, weight=1)
+        content.columnconfigure(3, weight=1)
+
+        # Row 0: State & Activity
+        tk.Label(content, text="State", font=(FONT, 10), fg=TEXT, bg=BG).grid(
+            row=0, column=0, sticky="w", pady=6
+        )
+        ttk.Combobox(content, textvariable=self.state_var,
+                     values=["IL", "CA", "IA", "TX", "AZ"],
+                     state="readonly", width=18).grid(row=0, column=1, sticky="w", padx=(8, 16), pady=6)
+
+        tk.Label(content, text="Field Activity", font=(FONT, 10), fg=TEXT, bg=BG).grid(
+            row=0, column=2, sticky="w", pady=6
+        )
+        ttk.Combobox(content, textvariable=self.activity_var,
+                     values=["tillage", "planting", "spraying", "harvesting"],
+                     state="readonly", width=20).grid(row=0, column=3, sticky="w", padx=(8, 0), pady=6)
+
+        # Row 1: Equipment & Supervision
+        tk.Label(content, text="Equipment Type", font=(FONT, 10), fg=TEXT, bg=BG).grid(
+            row=1, column=0, sticky="w", pady=6
+        )
+        ttk.Combobox(content, textvariable=self.equipment_var,
+                     values=["autonomous_tractor", "retrofit_kit"],
+                     state="readonly", width=18).grid(row=1, column=1, sticky="w", padx=(8, 16), pady=6)
+
+        tk.Label(content, text="Supervision Mode", font=(FONT, 10), fg=TEXT, bg=BG).grid(
+            row=1, column=2, sticky="w", pady=6
+        )
+        ttk.Combobox(content, textvariable=self.supervision_var,
+                     values=["on_site_line_of_sight", "remote_monitoring", "fully_unattended"],
+                     state="readonly", width=20).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=6)
+
+        # Row 2: Non-family workers
+        tk.Label(content, text="Non-Family Workers", font=(FONT, 10), fg=TEXT, bg=BG).grid(
+            row=2, column=0, sticky="w", pady=6
+        )
+        ttk.Spinbox(content, from_=0, to=500, textvariable=self.employees_var,
+                    width=16).grid(row=2, column=1, sticky="w", padx=(8, 16), pady=6)
+
+        # Checkboxes
+        checks = tk.Frame(content, bg=BG)
+        checks.grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 4))
+        tk.Checkbutton(
+            checks, text="Equipment crosses or travels on public roads between fields",
+            variable=self.road_var, font=(FONT, 10), fg=TEXT, bg=BG, activebackground=BG,
+        ).pack(anchor="w", pady=2)
+        tk.Checkbutton(
+            checks, text="Employees present or have access to operational zone of danger",
+            variable=self.exposure_var, font=(FONT, 10), fg=TEXT, bg=BG, activebackground=BG,
+        ).pack(anchor="w", pady=2)
+        tk.Checkbutton(
+            checks, text="Temporary labor camp operated in past 12 months",
+            variable=self.camp_var, font=(FONT, 10), fg=TEXT, bg=BG, activebackground=BG,
+        ).pack(anchor="w", pady=2)
+
+        buttons = tk.Frame(content, bg=BG)
+        buttons.grid(row=4, column=0, columnspan=4, sticky="e", pady=(18, 0))
+        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
+                   command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Apply", style="Accent.TButton",
+                   command=self.apply).pack(side="left", padx=4)
+
+    def apply(self):
+        try:
+            emp_count = int(self.employees_var.get().strip())
+            if emp_count < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Input error", "Non-family workers must be 0 or greater.", parent=self
+            )
+            return
+
+        profile = FarmerProfile(
+            state=self.state_var.get(),  # type: ignore[arg-type]
+            activity=self.activity_var.get(),  # type: ignore[arg-type]
+            equipment_type=self.equipment_var.get(),  # type: ignore[arg-type]
+            public_road_transit=self.road_var.get(),
+            supervision_mode=self.supervision_var.get(),  # type: ignore[arg-type]
+            non_family_employees=emp_count,
+            temporary_labor_camp=self.camp_var.get(),
+            employee_zone_exposure=self.exposure_var.get(),
+        )
+        self.on_apply(profile)
+        self.destroy()
+
+
+class LegalReportWindow(tk.Toplevel):
+    """Displays the full In-Field vs. Public Road breakdown and workarounds."""
+
+    def __init__(self, master, res: PipelineBResult):
+        super().__init__(master)
+        self.title("Detailed Regulatory Compliance Report")
+        self.geometry("680x520")
+        self.configure(bg=BG)
+
+        header = tk.Frame(self, bg=HEADER)
+        header.pack(fill="x")
+        tk.Label(header, text=f"Regulatory Report — Grade {res.letter_grade} ({res.feasibility})",
+                 font=(FONT, 16, "bold"), fg="white", bg=HEADER).pack(
+                     anchor="w", padx=20, pady=(12, 2)
+                 )
+        tk.Label(header, text=res.headline_summary, font=(FONT, 10),
+                 fg=HEADER_SUB, bg=HEADER, wraplength=630, justify="left").pack(
+                     anchor="w", padx=20, pady=(0, 12)
+                 )
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=14)
+
+        txt = tk.Text(body, wrap="word", font=(FONT, 10), bg=CARD, fg=TEXT,
+                      relief="solid", borderwidth=1, padx=12, pady=10)
+        txt.pack(fill="both", expand=True)
+
+        citations = "\n".join(f"  • {c}" for c in res.applicable_citations) or "  • None"
+        caveats = "\n".join(f"  • {c}" for c in res.plain_language_caveats)
+        report = (
+            f"1. IN-FIELD AUTONOMOUS OPERATION\n{res.in_field_assessment}\n\n"
+            f"2. PUBLIC ROAD TRANSIT OPERATION\n{res.public_road_assessment}\n\n"
+            f"3. APPLICABLE STATUTES & CITATIONS\n{citations}\n\n"
+            f"4. OPERATIONAL CAVEATS\n{caveats}\n\n"
+            f"5. RECOMMENDED WORKAROUND\n  {res.recommended_workaround}\n"
+        )
+        txt.insert("1.0", report)
+        txt.config(state="disabled")
+
+        ttk.Button(body, text="Close", style="Secondary.TButton",
+                   command=self.destroy).pack(anchor="e", pady=(10, 0))
 
 class RateOnomyApp(tk.Tk):
     def __init__(self):
@@ -779,6 +1019,9 @@ class RateOnomyApp(tk.Tk):
         self.roi_payback_years = None
         self.roi_calculated = False
         self.drivability_window = None
+        self.legal_window = None
+        self.legal_profile = None
+        self.last_legal_result = None
 
         # Header banner
         header = tk.Frame(self, bg=HEADER)
@@ -808,6 +1051,11 @@ class RateOnomyApp(tk.Tk):
             command=self.open_drivability_inputs,
         )
         self.drivability_btn.pack(side="left")
+        self.legal_btn = ttk.Button(
+            cin, text="Legal Inputs...", style="Secondary.TButton",
+            command=self.open_legal_inputs,
+        )
+        self.legal_btn.pack(side="left", padx=(8, 0))
         tk.Label(cin, textvariable=self.image_var, font=(FONT, 10), fg=MUTED,
                  bg=CARD).pack(side="left", padx=12)
         self.run_btn = ttk.Button(cin, text="Run Assessment", style="Accent.TButton",
@@ -919,10 +1167,29 @@ class RateOnomyApp(tk.Tk):
         self.field_area = field_area
         self.image_var.set(os.path.basename(image_path) if image_path else "")
 
+    def open_legal_inputs(self):
+        if self.legal_window is not None and self.legal_window.winfo_exists():
+            self.legal_window.lift()
+            self.legal_window.focus_force()
+            return
+        self.legal_window = LegalInputWindow(
+            self, self.legal_profile, self._on_legal_inputs
+        )
+        self.legal_window.transient(self)
+
+    def _on_legal_inputs(self, profile: FarmerProfile):
+        self.legal_profile = profile
+        self.legal_btn.config(text=f"Legal Inputs ({profile.state})...")
+
+    def open_legal_report(self):
+        if self.last_legal_result is not None:
+            win = LegalReportWindow(self, self.last_legal_result)
+            win.transient(self)
+
     def _set_running(self, running):
         self._running = running
         state = "disabled" if running else "normal"
-        for btn in (self.run_btn, self.clear_btn, self.drivability_btn, self.roi_btn):
+        for btn in (self.run_btn, self.clear_btn, self.drivability_btn, self.roi_btn, self.legal_btn):
             btn.config(state=state)
         if running:
             self.status_frame.pack(side="right", padx=(0, 16))
@@ -942,9 +1209,16 @@ class RateOnomyApp(tk.Tk):
                 "Open the ROI Calculator and click Calculate before running the assessment.",
             )
             return
+        if self.legal_profile is None:
+            messagebox.showerror(
+                "Legal inputs required",
+                "Open 'Legal Inputs...' and click Apply before running the assessment.",
+            )
+            return
         image_path = self.image_path
         roi_payback_years = self.roi_payback_years
         field_area = self.field_area
+        legal_profile = self.legal_profile
 
         self._set_running(True)
         self._outcome = {}
@@ -955,7 +1229,7 @@ class RateOnomyApp(tk.Tk):
             try:
                 self._outcome["roi"] = compute_roi_score(roi_payback_years)
                 self._outcome["driv"] = compute_drivability_score(image_path, field_area)
-                self._outcome["legal"] = compute_legal_score()
+                self._outcome["legal"] = compute_legal_score(legal_profile)
             except Exception as exc:
                 self._outcome["error"] = exc
 
@@ -978,6 +1252,16 @@ class RateOnomyApp(tk.Tk):
         self.roi_panel.update_result(roi, grade_from_score(roi["score"]))
         self.driv_panel.update_result(driv, grade_from_score(driv["score"]))
         self.legal_panel.update_result(legal, legal["grade"], legal["label"])
+
+        self.last_legal_result = legal.get("full_result")
+        self.legal_panel.summary_label.config(text=legal["summary"])
+        if self.last_legal_result is not None:
+            ttk.Button(
+                self.legal_panel.details,
+                text="View In-Field & Road Report...",
+                style="Secondary.TButton",
+                command=self.open_legal_report,
+            ).pack(fill="x", pady=(8, 0))
 
         composite = compute_composite(roi["score"], driv["score"], legal["score"])
         grade = grade_from_score(composite)
@@ -1006,7 +1290,14 @@ class RateOnomyApp(tk.Tk):
         self.composite_badge.config(text="-", bg=PENDING)
         self.composite_bar.set(0, PENDING)
         self.feasibility_label.config(text="", bg=CARD)
+        self.legal_profile = None
+        self.last_legal_result = None
+        self.legal_btn.config(text="Legal Inputs...")
+        self.legal_panel.summary_label.config(text=SUMMARIES["legal"])
+        if self.legal_window is not None and self.legal_window.winfo_exists():
+            self.legal_window.destroy()
 
 
 if __name__ == "__main__":
+    prompt_for_api_keys()
     RateOnomyApp().mainloop()
