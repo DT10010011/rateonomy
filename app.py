@@ -8,17 +8,55 @@ import os
 import math
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, font as tkfont
+from tkinter import ttk, filedialog, messagebox, font as tkfont, simpledialog
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv, set_key
 from PIL import Image, ImageDraw, ImageChops, ImageFont, ImageTk
 from inference_sdk import InferenceHTTPClient, InferenceConfiguration
 from pipeline_b import PipelineBResult, evaluate_regulatory_compliance
 from schema import FarmerProfile
 
 CORPUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regulatory_corpus.json")
-# Load ROBOFLOW_API_KEY from a .env file next to this script
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(ENV_PATH)
+
+
+def prompt_for_api_keys():
+    if not os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "w", encoding="utf-8") as env_file:
+            env_file.write("ROBOFLOW_API_KEY=NONE\nGEMINI_API_KEY=NONE\n")
+
+    for key_name, provider in (
+        ("ROBOFLOW_API_KEY", "Roboflow"),
+        ("GEMINI_API_KEY", "Gemini"),
+    ):
+        key_value = dotenv_values(ENV_PATH).get(key_name)
+        if not key_value or not key_value.strip():
+            success, _, _ = set_key(ENV_PATH, key_name, "NONE")
+            if not success:
+                raise OSError(f"Could not save {key_name} to {ENV_PATH}.")
+            key_value = "NONE"
+        if key_value.strip() != "NONE":
+            continue
+
+        dialog_root = tk.Tk()
+        dialog_root.withdraw()
+        try:
+            api_key = simpledialog.askstring(
+                f"{provider} API Key",
+                f"Enter your {provider} API key:",
+                parent=dialog_root,
+                show="*",
+            )
+        finally:
+            dialog_root.destroy()
+
+        if api_key and api_key.strip():
+            api_key = api_key.strip()
+            success, _, _ = set_key(ENV_PATH, key_name, api_key)
+            if not success:
+                raise OSError(f"Could not save {key_name} to {ENV_PATH}.")
+            os.environ[key_name] = api_key
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1261,4 +1299,5 @@ class RateOnomyApp(tk.Tk):
 
 
 if __name__ == "__main__":
+    prompt_for_api_keys()
     RateOnomyApp().mainloop()
