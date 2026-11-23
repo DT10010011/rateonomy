@@ -104,14 +104,12 @@ def compute_roi_score(payback_years=None):
         ratings = [
             (9, 1), (8, 2), (7, 3), (6, 4), (5, 5),
             (4, 6), (3, 7), (2, 8), (1.5, 9), (1,10)
-           
         ]
-        score = 1
-        if payback_years > 0.5:
-            for limit, rating in ratings:
-                if payback_years >= limit:
-                    score = rating
-                    break
+        score = 10
+        for limit, rating in ratings:
+            if payback_years >= limit:
+                score = rating
+                break
         payback_label = f"{payback_years:,.1f} years"
 
     return {
