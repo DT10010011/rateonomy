@@ -20,6 +20,17 @@ CORPUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regulato
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(ENV_PATH)
 
+# Workaround for macOS Tcl/Tk 9.1 removing ::tk::unsupported::MacWindowStyle
+_orig_setup_dialog = simpledialog._setup_dialog
+
+def _safe_setup_dialog(w):
+    try:
+        _orig_setup_dialog(w)
+    except tk.TclError as exc:
+        if "MacWindowStyle" not in str(exc):
+            raise
+
+simpledialog._setup_dialog = _safe_setup_dialog
 
 def prompt_for_api_keys():
     if not os.path.exists(ENV_PATH):
