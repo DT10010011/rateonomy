@@ -16,12 +16,39 @@ from inference_sdk import InferenceHTTPClient, InferenceConfiguration
 from pipeline_b import PipelineBResult, evaluate_regulatory_compliance
 from schema import FarmerProfile
 
+import json
+import hashlib
+from pydantic import ValidationError
+
+import queue
+from pipeline_b import AssessmentCancelled, PipelineBResult, evaluate_regulatory_compliance
+
 CORPUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regulatory_corpus.json")
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(ENV_PATH)
 
+LEGAL_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "legal_cache.json")
+
 # Workaround for macOS Tcl/Tk 9.1 removing ::tk::unsupported::MacWindowStyle
 _orig_setup_dialog = simpledialog._setup_dialog
+
+user_friendly_labels = {
+    'autonomous_tractor': 'Autonomous tractor',
+    'retrofit_kit' : 'Retrofit kit',
+    'on_site_line_of_sight' : 'On site, within line of sight',
+    'remote_monitoring' : 'Remotely monitored',
+    'fully_unattended' : 'Fully unattended',
+    'tillage' : 'Tillage',
+    'planting' : 'Planting',
+    'spraying' : 'Spraying',
+    'harvesting' : 'Harvesting'
+}
+
+u = user_friendly_labels # shortform for convenience
+
+system_labels = {v: k for k, v in user_friendly_labels.items()} # invert user friendly labels
+
+s = system_labels # shortform for convenience
 
 def _safe_setup_dialog(w):
     try:
@@ -272,16 +299,60 @@ FEASIBILITY_DISPLAY = {
     "PROHIBITED": ("Prohibited", "Prohibited under current rules"),
 }
 
+def _corpus_fingerprint():
+    """Hash of the corpus file; any edit to it invalidates cached legal results."""
+    with open(CORPUS_PATH, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:16]
 
-def compute_legal_score(farmer_profile: FarmerProfile | None = None):
-    """Run Pipeline B and adapt PipelineBResult to app.py's 0-10 panel contract."""
+
+def _load_legal_cache():
+    try:
+        with open(LEGAL_CACHE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):  # missing or corrupted file -> start fresh
+        return {}
+
+
+def _save_legal_cache(cache):
+    tmp = LEGAL_CACHE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+    os.replace(tmp, LEGAL_CACHE_PATH)  # atomic, so a crash can't leave a half-written file
+
+
+def compute_legal_score(farmer_profile: FarmerProfile | None = None, status_callback=None, cancel_event=None):
+    """Run Pipeline B (or reuse a cached result) and adapt it to app.py's 0-10 panel contract."""
     if farmer_profile is None:
         raise ValueError("Open 'Legal Inputs...' and apply your farm profile before running.")
 
-    res: PipelineBResult = evaluate_regulatory_compliance(
-        farmer=farmer_profile,
-        corpus_path=CORPUS_PATH,
-    )
+    fingerprint = _corpus_fingerprint()
+    key = f"{fingerprint}:{farmer_profile.model_dump_json()}"
+    cache = _load_legal_cache()
+
+    res = None
+    from_cache = False
+    if key in cache:
+        try:
+            res = PipelineBResult.model_validate(cache[key])
+            from_cache = True
+        except ValidationError:  # entry from an older PipelineBResult format
+            res = None
+
+    if res is None:
+        res: PipelineBResult = evaluate_regulatory_compliance(
+            farmer=farmer_profile,
+            corpus_path=CORPUS_PATH,
+            status_callback=status_callback,
+            cancel_event=cancel_event,
+        )
+        # Keep only entries for the current corpus, then add this one
+        cache = {k: v for k, v in cache.items() if k.startswith(fingerprint + ":")}
+        cache[key] = res.model_dump(mode="json")
+        try:
+            _save_legal_cache(cache)
+        except OSError:
+            pass  # caching is best-effort; never fail the assessment over it
 
     label, feasible_text = FEASIBILITY_DISPLAY[res.feasibility]
     citations_str = ", ".join(res.applicable_citations) if res.applicable_citations else "None"
@@ -380,6 +451,13 @@ def setup_styles(root):
 
 def make_card(parent):
     return tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+
+def center_window(win, width, height):
+    """Size a window and place it in the middle of the screen."""
+    # win.update_idletasks()
+    x = (win.winfo_screenwidth() - width) // 2
+    y = (win.winfo_screenheight() - height) // 2
+    win.geometry(f"{width}x{height}+{x}+{max(0, y)}")
 
 
 class Spinner(tk.Canvas):
@@ -602,12 +680,28 @@ AUTONOMY_FIELDS = [
     ("autLaborRate", "Labor rate ($/hr)", float, None),
 ]
 
+EXAMPLE_ROI_VALUES = {
+    # Conventional: two tractors, one driver each
+    "conEquipCost": 350000,
+    "conSubCost": 5000,          # autosteer / RTK
+    "conNumMachines": 2,
+    "conLaborRate": 22.0,
+    # Autonomous: same tractors plus a retrofit kit
+    "autEquipCost": 350000,
+    "autRetroCost": 60000,
+    "autSubCost": 12000,         # autonomy software + RTK
+    "autNumMachines": 2,
+    "autMachinesPerOperator": 2,
+    "dedicatedTimeRaw": 25,      # operator supervises 25% of the time
+    "autLaborRate": 25.0,        # slightly higher wage for a skilled supervisor
+}
+
 
 class ROIApp(tk.Toplevel):
     def __init__(self, master, on_result=None, font_family="Segoe UI"):
         super().__init__(master)
         self.title("Autonomy ROI Calculator")
-        self.geometry("900x700")
+        center_window(self, 980, 760)
         self.resizable(False, False)
         self.configure(bg=BG)
         self.entries = {}
@@ -638,6 +732,8 @@ class ROIApp(tk.Toplevel):
         btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(btns, text="Calculate", style="ROI.Accent.TButton",
                    command=self.calculate).pack(side="left", padx=4)
+        ttk.Button(btns, text="For developers: Fill Example", style="ROI.Secondary.TButton",
+                   command=self.fill_example).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", style="ROI.Secondary.TButton",
                    command=self.clear).pack(side="left", padx=4)
         ttk.Button(btns, text="Done", style="ROI.Secondary.TButton",
@@ -767,6 +863,13 @@ class ROIApp(tk.Toplevel):
         if self.on_result:
             self.on_result(self.payback_years, True)
 
+    def fill_example(self):
+        """Fill every input with sample values (does not calculate)."""
+        for key, value in EXAMPLE_ROI_VALUES.items():
+            entry = self.entries[key]
+            entry.delete(0, tk.END)
+            entry.insert(0, str(value))
+
     def clear(self):
         for entry in self.entries.values():
             entry.delete(0, tk.END)
@@ -778,14 +881,17 @@ class ROIApp(tk.Toplevel):
 
 
 class DrivabilityInputWindow(tk.Toplevel):
+    PREVIEW_MAX = (540, 250)  # fits inside the window
+
     def __init__(self, master, image_path, field_area, on_apply):
         super().__init__(master)
         self.title("Drivability Inputs")
-        self.geometry("620x250")
+        center_window(self, 620, 560)
         self.resizable(False, False)
         self.configure(bg=BG)
         self.image_path = image_path
         self.on_apply = on_apply
+        self._preview_photo = None
 
         header = tk.Frame(self, bg=HEADER)
         header.pack(fill="x")
@@ -798,16 +904,32 @@ class DrivabilityInputWindow(tk.Toplevel):
 
         content = tk.Frame(self, bg=BG)
         content.pack(fill="both", expand=True, padx=20, pady=16)
+
+        # Buttons first, pinned to the bottom, so nothing above can push them around
+        buttons = tk.Frame(content, bg=BG)
+        buttons.pack(side="bottom", fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="Apply", style="Accent.TButton",
+                   command=self.apply).pack(side="right", padx=4)
+        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
+                   command=self.destroy).pack(side="right", padx=4)
+
         image_row = tk.Frame(content, bg=BG)
-        image_row.pack(fill="x", pady=(0, 14))
+        image_row.pack(fill="x", pady=(0, 10))
         ttk.Button(image_row, text="Select Field Image...",
                    style="Secondary.TButton", command=self.select_image).pack(side="left")
         self.image_var = tk.StringVar(value=self._image_label(image_path))
         tk.Label(image_row, textvariable=self.image_var, font=(FONT, 10),
                  fg=MUTED, bg=BG).pack(side="left", padx=12)
 
+        preview_card = make_card(content)
+        preview_card.pack(fill="both", expand=True)
+        tk.Label(preview_card, text="", font=(FONT, 9, "bold"),
+                 fg=MUTED, bg=CARD).pack(anchor="w", padx=12, pady=(8, 0))
+        self.preview_label = tk.Label(preview_card, bg=CARD, fg=MUTED, font=(FONT, 10))
+        self.preview_label.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
         size_row = tk.Frame(content, bg=BG)
-        size_row.pack(fill="x")
+        size_row.pack(fill="x", pady=(12, 0))
         tk.Label(size_row, text="Field size (acres)", font=(FONT, 10),
                  fg=TEXT, bg=BG).pack(side="left")
         self.field_area_entry = ttk.Entry(size_row, width=14)
@@ -815,16 +937,31 @@ class DrivabilityInputWindow(tk.Toplevel):
         if field_area is not None:
             self.field_area_entry.insert(0, str(field_area))
 
-        buttons = tk.Frame(content, bg=BG)
-        buttons.pack(side="right", pady=(16, 0))
-        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
-                   command=self.destroy).pack(side="left", padx=4)
-        ttk.Button(buttons, text="Apply", style="Accent.TButton",
-                   command=self.apply).pack(side="left", padx=4)
+
+
+        # Redraw the preview whenever the selected image changes
+        self.image_var.trace_add("write", lambda *_: self._show_preview(self.image_path))
+        self._show_preview(image_path)
 
     @staticmethod
     def _image_label(image_path):
         return os.path.basename(image_path) if image_path else "No field image selected"
+
+    def _show_preview(self, path):
+        if not path:
+            self._preview_photo = None
+            self.preview_label.config(image="", text="No image selected")
+            return
+        try:
+            with Image.open(path) as img:
+                img = img.convert("RGB")  # handles RGBA PNGs and most TIFFs
+                img.thumbnail(self.PREVIEW_MAX, Image.Resampling.LANCZOS)
+                self._preview_photo = ImageTk.PhotoImage(img, master=self)
+        except Exception as exc:
+            self._preview_photo = None
+            self.preview_label.config(image="", text=f"Could not preview image: {exc}")
+            return
+        self.preview_label.config(image=self._preview_photo, text="")
 
     def select_image(self):
         path = filedialog.askopenfilename(
@@ -834,7 +971,7 @@ class DrivabilityInputWindow(tk.Toplevel):
             parent=self,
         )
         if path:
-            self.image_path = path
+            self.image_path = path            # set before image_var so the trace sees it
             self.image_var.set(self._image_label(path))
 
     def apply(self):
@@ -860,7 +997,7 @@ class LegalInputWindow(tk.Toplevel):
     def __init__(self, master, current_profile: FarmerProfile | None, on_apply):
         super().__init__(master)
         self.title("Legal & Regulatory Inputs")
-        self.geometry("640x430")
+        center_window(self, 640, 430)
         self.resizable(False, False)
         self.configure(bg=BG)
         self.on_apply = on_apply
@@ -876,9 +1013,9 @@ class LegalInputWindow(tk.Toplevel):
 
         p = current_profile
         self.state_var = tk.StringVar(value=p.state if p else "IL")
-        self.activity_var = tk.StringVar(value=p.activity if p else "tillage")
-        self.equipment_var = tk.StringVar(value=p.equipment_type if p else "autonomous_tractor")
-        self.supervision_var = tk.StringVar(value=p.supervision_mode if p else "remote_monitoring")
+        self.activity_var = tk.StringVar(value=u[p.activity] if p else u["tillage"])
+        self.equipment_var = tk.StringVar(value=u[p.equipment_type] if p else u["autonomous_tractor"])
+        self.supervision_var = tk.StringVar(value=u[p.supervision_mode] if p else u["remote_monitoring"])
         self.employees_var = tk.StringVar(value=str(p.non_family_employees) if p else "4")
         self.road_var = tk.BooleanVar(value=p.public_road_transit if p else True)
         self.camp_var = tk.BooleanVar(value=p.temporary_labor_camp if p else False)
@@ -901,7 +1038,7 @@ class LegalInputWindow(tk.Toplevel):
             row=0, column=2, sticky="w", pady=6
         )
         ttk.Combobox(content, textvariable=self.activity_var,
-                     values=["tillage", "planting", "spraying", "harvesting"],
+                     values=[u["tillage"], u["planting"], u["spraying"], u["harvesting"]],
                      state="readonly", width=20).grid(row=0, column=3, sticky="w", padx=(8, 0), pady=6)
 
         # Row 1: Equipment & Supervision
@@ -909,14 +1046,14 @@ class LegalInputWindow(tk.Toplevel):
             row=1, column=0, sticky="w", pady=6
         )
         ttk.Combobox(content, textvariable=self.equipment_var,
-                     values=["autonomous_tractor", "retrofit_kit"],
+                     values=[u["autonomous_tractor"], u["retrofit_kit"]],
                      state="readonly", width=18).grid(row=1, column=1, sticky="w", padx=(8, 16), pady=6)
 
         tk.Label(content, text="Supervision Mode", font=(FONT, 10), fg=TEXT, bg=BG).grid(
             row=1, column=2, sticky="w", pady=6
         )
         ttk.Combobox(content, textvariable=self.supervision_var,
-                     values=["on_site_line_of_sight", "remote_monitoring", "fully_unattended"],
+                     values=[u["on_site_line_of_sight"], u["remote_monitoring"], u["fully_unattended"]],
                      state="readonly", width=20).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=6)
 
         # Row 2: Non-family workers
@@ -962,10 +1099,10 @@ class LegalInputWindow(tk.Toplevel):
 
         profile = FarmerProfile(
             state=self.state_var.get(),  # type: ignore[arg-type]
-            activity=self.activity_var.get(),  # type: ignore[arg-type]
-            equipment_type=self.equipment_var.get(),  # type: ignore[arg-type]
+            activity=s[self.activity_var.get()],  # type: ignore[arg-type]
+            equipment_type=s[self.equipment_var.get()],  # type: ignore[arg-type]
             public_road_transit=self.road_var.get(),
-            supervision_mode=self.supervision_var.get(),  # type: ignore[arg-type]
+            supervision_mode=s[self.supervision_var.get()],  # type: ignore[arg-type]
             non_family_employees=emp_count,
             temporary_labor_camp=self.camp_var.get(),
             employee_zone_exposure=self.exposure_var.get(),
@@ -980,7 +1117,7 @@ class LegalReportWindow(tk.Toplevel):
     def __init__(self, master, res: PipelineBResult):
         super().__init__(master)
         self.title("Detailed Regulatory Compliance Report")
-        self.geometry("680x520")
+        center_window(self, 680, 520)
         self.configure(bg=BG)
 
         header = tk.Frame(self, bg=HEADER)
@@ -1020,7 +1157,7 @@ class RateOnomyApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("RateOnomy - Autonomy Decision Support")
-        self.geometry("980x760")
+        center_window(self, 980, 760)
         self.minsize(920, 720)
         self.configure(bg=BG)
         global FONT
@@ -1080,11 +1217,17 @@ class RateOnomyApp(tk.Tk):
         self._running = False
         self._worker = None
         self._outcome = {}
+        self._cancel_event = threading.Event()
+        self._status_queue = queue.Queue()
+        self.status_var = tk.StringVar(value="Running assessment...")
         self.status_frame = tk.Frame(cin, bg=CARD)
         self.spinner = Spinner(self.status_frame)
         self.spinner.pack(side="left")
-        tk.Label(self.status_frame, text="Running assessment...", font=(FONT, 10),
-                 fg=MUTED, bg=CARD).pack(side="left", padx=(8, 0))
+        tk.Label(self.status_frame, textvariable=self.status_var, font=(FONT, 10),
+                 fg=MUTED, bg=CARD).pack(side="left", padx=(8, 8))
+        self.cancel_btn = ttk.Button(self.status_frame, text="Cancel",
+                                     style="Secondary.TButton", command=self.cancel_assessment)
+        self.cancel_btn.pack(side="left")
 
         # Three component panels
         panels = tk.Frame(body, bg=BG)
@@ -1203,6 +1346,8 @@ class RateOnomyApp(tk.Tk):
         for btn in (self.run_btn, self.clear_btn, self.drivability_btn, self.roi_btn, self.legal_btn):
             btn.config(state=state)
         if running:
+            self.status_var.set("Running assessment...")
+            self.cancel_btn.config(state="normal")
             self.status_frame.pack(side="right", padx=(0, 16))
             self.spinner.start()
             self.config(cursor="watch")
@@ -1233,14 +1378,23 @@ class RateOnomyApp(tk.Tk):
 
         self._set_running(True)
         self._outcome = {}
+        self._cancel_event = threading.Event()
+        cancel_event = self._cancel_event
+        status_queue = self._status_queue
 
         def work():
             # Runs off the UI thread so the spinner keeps animating.
-            # Do not touch any tkinter widgets in here.
+            # Do not touch any tkinter widgets in here; send status text through the queue.
             try:
                 self._outcome["roi"] = compute_roi_score(roi_payback_years)
                 self._outcome["driv"] = compute_drivability_score(image_path, field_area)
-                self._outcome["legal"] = compute_legal_score(legal_profile)
+                if cancel_event.is_set():
+                    raise AssessmentCancelled("Assessment cancelled.")
+                self._outcome["legal"] = compute_legal_score(
+                    legal_profile,
+                    status_callback=status_queue.put,
+                    cancel_event=cancel_event,
+                )
             except Exception as exc:
                 self._outcome["error"] = exc
 
@@ -1248,13 +1402,32 @@ class RateOnomyApp(tk.Tk):
         self._worker.start()
         self.after(100, self._poll_worker)
 
+    def cancel_assessment(self):
+        self._cancel_event.set()
+        self.status_var.set("Cancelling...")
+        self.cancel_btn.config(state="disabled")
+
+    def _drain_status(self):
+        latest = None
+        try:
+            while True:
+                latest = self._status_queue.get_nowait()
+        except queue.Empty:
+            pass
+        if latest is not None and not self._cancel_event.is_set():
+            self.status_var.set(latest)
+
     def _poll_worker(self):
+        self._drain_status()
         if self._worker.is_alive():
             self.after(100, self._poll_worker)
             return
         self._set_running(False)
-        if "error" in self._outcome:
-            messagebox.showerror("Assessment error", str(self._outcome["error"]))
+        err = self._outcome.get("error")
+        if isinstance(err, AssessmentCancelled):
+            return  # user chose to stop; no error popup
+        if err is not None:
+            messagebox.showerror("Assessment error", str(err))
             return
         self._show_results(self._outcome["roi"], self._outcome["driv"],
                            self._outcome["legal"])
