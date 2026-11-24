@@ -22,6 +22,22 @@ from pydantic import ValidationError
 
 import queue
 from pipeline_b import AssessmentCancelled, PipelineBResult, evaluate_regulatory_compliance
+from datetime import datetime
+from html import escape
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Image as RLImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
 
 CORPUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regulatory_corpus.json")
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -100,7 +116,7 @@ def prompt_for_api_keys():
 # Configuration
 # ---------------------------------------------------------------------------
 # Weight vector from the midterm report: [ROI, Drivability, Legal]
-WEIGHTS = {"roi": 0.3, "drivability": 0.2, "legal": 0.5}
+WEIGHTS = {"roi": 1 / 3, "drivability": 1 / 3, "legal": 1 / 3}
 MAX_SCORE = 10.0
 
 # Static panel descriptions shown under each score
@@ -142,14 +158,12 @@ def compute_roi_score(payback_years=None):
         ratings = [
             (9, 1), (8, 2), (7, 3), (6, 4), (5, 5),
             (4, 6), (3, 7), (2, 8), (1.5, 9), (1,10)
-           
         ]
-        score = 1
-        if payback_years > 0.5:
-            for limit, rating in ratings:
-                if payback_years >= limit:
-                    score = rating
-                    break
+        score = 10
+        for limit, rating in ratings:
+            if payback_years >= limit:
+                score = rating
+                break
         payback_label = f"{payback_years:,.1f} years"
 
     return {
@@ -293,6 +307,38 @@ def compute_drivability_score(image_path=None, field_area=None):
     }
 
 
+def compute_drivability_score_for_fields(fields):
+    """Score each field independently and combine scores by field area."""
+    if not fields:
+        return compute_drivability_score()
+
+    results = [
+        compute_drivability_score(field["image_path"], field["field_area"])
+        for field in fields
+    ]
+    total_area = sum(field["field_area"] for field in fields)
+    weighted_score = sum(
+        result["score"] * field["field_area"]
+        for field, result in zip(fields, results)
+    ) / total_area
+    details = [
+        ("Fields analyzed", str(len(fields))),
+        ("Combination method", "Area-weighted average"),
+    ]
+    for index, result in enumerate(results, start=1):
+        details.append((f"Field {index} score", f"{result['score']:.1f} / 10"))
+        details.extend(
+            (f"Field {index} {label}", value)
+            for label, value in result["details"]
+        )
+
+    return {
+        "score": round(weighted_score, 1),
+        "summary": f"Area-weighted drivability score across {len(fields)} fields.",
+        "details": details,
+    }
+
+
 FEASIBILITY_DISPLAY = {
     "PERMITTED": ("Workable", "Legally feasible"),
     "CONDITIONAL": ("Conditional", "Restricted — conditions apply"),
@@ -343,16 +389,20 @@ def compute_legal_score(farmer_profile: FarmerProfile | None = None, status_call
         res: PipelineBResult = evaluate_regulatory_compliance(
             farmer=farmer_profile,
             corpus_path=CORPUS_PATH,
+            legal_weight=WEIGHTS["legal"],
             status_callback=status_callback,
             cancel_event=cancel_event,
         )
-        # Keep only entries for the current corpus, then add this one
-        cache = {k: v for k, v in cache.items() if k.startswith(fingerprint + ":")}
-        cache[key] = res.model_dump(mode="json")
-        try:
-            _save_legal_cache(cache)
-        except OSError:
-            pass  # caching is best-effort; never fail the assessment over it
+        # Only cache real Gemini results. A deterministic fallback (Gemini unavailable)
+        # is not cached, so the next run tries Gemini again.
+        if "fallback" not in res.model_used.lower():
+            # Keep only entries for the current corpus, then add this one
+            cache = {k: v for k, v in cache.items() if k.startswith(fingerprint + ":")}
+            cache[key] = res.model_dump(mode="json")
+            try:
+                _save_legal_cache(cache)
+            except OSError:
+                pass  # caching is best-effort; never fail the assessment over it
 
     label, feasible_text = FEASIBILITY_DISPLAY[res.feasibility]
     citations_str = ", ".join(res.applicable_citations) if res.applicable_citations else "None"
@@ -369,12 +419,20 @@ def compute_legal_score(farmer_profile: FarmerProfile | None = None, status_call
         else "None"
     )
 
+    is_fallback = "fallback" in res.model_used.lower()
+    engine_label = (
+        "Local Corpus (API Fallback)"
+        if is_fallback
+        else f"Gemini ({res.model_used})"
+    )
+
     details = [
         ("State / Activity", f"{farmer_profile.state} ({farmer_profile.activity})"),
         ("OSHA Small-Farm Exempt", "Yes" if res.osha_small_farm_exempt else "No"),
         ("Triggered Statutes", citations_count),
         ("Human Road Driver Req.", road_req),
         ("Min Supervision Floor", sup_floor),
+        ("Evaluation Engine", engine_label),
     ]
 
     return {
@@ -394,6 +452,291 @@ def compute_composite(roi, drivability, legal):
         + WEIGHTS["legal"] * legal
     )
 
+def export_assessment_pdf(filepath: str, assessment: dict) -> None:
+    """Generate a formatted PDF report of the RateOnomy assessment results."""
+    roi = assessment["roi"]
+    driv = assessment["driv"]
+    legal = assessment["legal"]
+    composite = assessment["composite"]
+    comp_grade = assessment["composite_grade"]
+    profile: FarmerProfile = assessment["profile"]
+    full_res: PipelineBResult = legal["full_result"]
+    roi_pct = round(WEIGHTS["roi"] * 100)
+    driv_pct = round(WEIGHTS["drivability"] * 100)
+    legal_pct = round(WEIGHTS["legal"] * 100)
+
+    doc = SimpleDocTemplate(
+        filepath,
+        pagesize=letter,
+        leftMargin=0.65 * inch,
+        rightMargin=0.65 * inch,
+        topMargin=0.6 * inch,
+        bottomMargin=0.6 * inch,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Heading1"],
+        fontSize=20,
+        leading=24,
+        textColor=colors.white,
+        spaceAfter=2,
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSub",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#CFE3D3"),
+    )
+    h2_style = ParagraphStyle(
+        "SectionHeader",
+        parent=styles["Heading2"],
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#2F5D3A"),
+        spaceBefore=12,
+        spaceAfter=6,
+    )
+    h3_style = ParagraphStyle(
+        "SubHeader",
+        parent=styles["Heading3"],
+        fontSize=10.5,
+        leading=14,
+        textColor=colors.HexColor("#1F2A24"),
+        spaceBefore=8,
+        spaceAfter=3,
+    )
+    body_style = ParagraphStyle(
+        "BodyTextCustom",
+        parent=styles["Normal"],
+        fontSize=9.5,
+        leading=13.5,
+        textColor=colors.HexColor("#1F2A24"),
+    )
+    muted_style = ParagraphStyle(
+        "MutedText",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=11.5,
+        textColor=colors.HexColor("#6B7770"),
+    )
+
+    big_score_style = ParagraphStyle(
+        "BigCompositeScore",
+        parent=body_style,
+        fontSize=22,
+        leading=26,
+        spaceBefore=4,
+        spaceAfter=4,
+    )
+
+
+    story = []
+
+    # --- Header Banner ---
+    timestamp = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    banner_data = [[
+        Paragraph("RateOnomy — Autonomy Decision Support Report", title_style),
+    ], [
+        Paragraph(
+            f"Generated {escape(timestamp)}  |  Jurisdiction: {escape(profile.state)}  |  "
+            f"Activity: {escape(profile.activity.title())}  |  "
+            f"Supervision: {escape(profile.supervision_mode.replace('_', ' '))}",
+            subtitle_style,
+        ),
+    ]]
+    banner_tbl = Table(banner_data, colWidths=[7.2 * inch])
+    banner_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#2F5D3A")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (0, 0), 12),
+        ("BOTTOMPADDING", (0, -1), (0, -1), 12),
+    ]))
+    story.append(banner_tbl)
+    story.append(Spacer(1, 12))
+
+    # --- Overall Composite Score & Legal Feasibility Conditions ---
+    story.append(Paragraph("1. Overall Composite Score &amp; Legal Feasibility", h2_style))
+
+    feasible_text = legal["feasible"]
+    is_feasible = feasible_text.lower().startswith("legally feasible")
+    status_bg = colors.HexColor("#E8F5E9") if is_feasible else colors.HexColor("#FDEDEC")
+    status_fg = "#1B7A3D" if is_feasible else "#C0392B"
+
+    # Build explicit operational conditions list
+    conditions = [f"Legal Status: {feasible_text} (Grade {legal['grade']} — {legal['label']})"]
+    if full_res.roi_handoff.requires_human_road_transport:
+        conditions.append("Condition: Human operator or trailer required for public road transit between fields.")
+    if full_res.roi_handoff.min_supervision_pct_override is not None:
+        conditions.append(
+            f"Condition: Minimum {full_res.roi_handoff.min_supervision_pct_override}% human supervision required."
+        )
+    if profile.state == "CA" and not profile.employee_zone_exposure:
+        conditions.append("Condition: Strict perimeter isolation required (zero employee access to zone of danger).")
+    if full_res.osha_small_farm_exempt:
+        conditions.append("Exemption: Federal OSHA small-farm enforcement exemption applies (<=10 non-family workers, no TLC).")
+
+    conditions_html = "<br/>".join(f"• {escape(c)}" for c in conditions)
+
+    comp_table = Table(
+        [
+            [
+                [
+                    Paragraph("<b>Composite Autonomy Score</b>", body_style),
+                    Paragraph(
+                        f"<font color='#2F5D3A'><b>{composite:.1f} / 10</b></font> "
+                        f"<font size=10><b>(Grade {escape(comp_grade)})</b></font>",
+                        big_score_style,
+                    ),
+                    Paragraph(
+                        f"<font size=8 color='#6B7770'>Weights: {roi_pct}% ROI + "
+                        f"{driv_pct}% Drivability + {legal_pct}% Legal</font>",
+                        muted_style,
+                    ),
+                ],
+                Paragraph(
+                    f"<b><font color='{status_fg}'>Compliance &amp; Conditions Summary</font></b><br/>"
+                    f"{conditions_html}",
+                    body_style,
+                ),
+            ]
+        ],
+        colWidths=[2.6 * inch, 4.6 * inch],
+    )
+    comp_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#F2F5F1")),
+        ("BACKGROUND", (1, 0), (1, 0), status_bg),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#DCE3DC")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.75, colors.HexColor("#DCE3DC")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(comp_table)
+    story.append(Spacer(1, 10))
+
+    # --- Three Component Breakdowns ---
+    story.append(Paragraph("2. Component Scores Breakdown", h2_style))
+
+    components = [
+        (f"ROI Component ({roi_pct}% Weight)", roi, grade_from_score(roi["score"])),
+        (f"Drivability Component ({driv_pct}% Weight)", driv, grade_from_score(driv["score"])),
+        (f"Legal Feasibility Component ({legal_pct}% Weight)", legal, legal["grade"]),
+    ]
+
+    for comp_title, comp_data, comp_ltr in components:
+        rows = [[
+            Paragraph(
+                f"<b>{escape(comp_title)}</b> — Score: <b>{comp_data['score']:.1f} / 10</b> (Grade {escape(comp_ltr)})",
+                body_style,
+            ),
+            "",
+        ], [
+            Paragraph(f"<i>{escape(comp_data['summary'])}</i>", muted_style),
+            "",
+        ]]
+        for k, v in comp_data["details"]:
+            rows.append([
+                Paragraph(escape(str(k)), muted_style),
+                Paragraph(f"<b>{escape(str(v))}</b>", body_style),
+            ])
+
+        tbl = Table(rows, colWidths=[2.6 * inch, 4.6 * inch])
+        tbl.setStyle(TableStyle([
+            ("SPAN", (0, 0), (1, 0)),
+            ("SPAN", (0, 1), (1, 1)),
+            ("BACKGROUND", (0, 0), (1, 0), colors.HexColor("#E6EBE5")),
+            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
+            ("LINEBELOW", (0, 1), (1, 1), 0.6, colors.HexColor("#DCE3DC")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 8))
+        image_paths = assessment.get("image_paths") or []
+        if comp_data is driv:
+            for field_num, image_path in enumerate(image_paths, start=1):
+                if not image_path or not os.path.exists(image_path):
+                    continue
+                try:
+                    with Image.open(image_path) as pil_img:
+                        rgb_img = pil_img.convert("RGB")
+                        orig_w, orig_h = rgb_img.size
+                        buf = BytesIO()
+                        rgb_img.save(buf, format="PNG")
+                        buf.seek(0)
+
+                    # Fit image proportionally within 4.5" wide x 2.6" tall
+                    max_w, max_h = 4.5 * inch, 2.6 * inch
+                    scale = min(max_w / orig_w, max_h / orig_h)
+                    disp_w, disp_h = orig_w * scale, orig_h * scale
+
+                    img_tbl = Table(
+                        [
+                            [RLImage(buf, width=disp_w, height=disp_h)],
+                            [Paragraph(f"<i>Field {field_num} image: {escape(os.path.basename(image_path))}</i>",
+                                       muted_style)],
+                        ],
+                        colWidths=[7.2 * inch],
+                    )
+                    img_tbl.setStyle(TableStyle([
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAF8")),
+                        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]))
+                    story.append(img_tbl)
+                    story.append(Spacer(1, 8))
+                except Exception:  # noqa: BLE001
+                    story.append(Paragraph(
+                        f"<i>Field {field_num} image ({escape(os.path.basename(image_path))}) could not be embedded.</i>",
+                        muted_style,
+                    ))
+                    story.append(Spacer(1, 6))
+
+    # --- Detailed Regulatory Compliance Report ---
+    story.append(Paragraph("3. Detailed Regulatory Compliance Report", h2_style))
+
+    if "fallback" in full_res.model_used.lower():
+        story.append(Paragraph(
+            "<i>Note: Generated via local deterministic corpus fallback due to cloud API timeout. "
+            "Scores, citations, and compliance flags remain fully verified.</i>",
+            muted_style,
+        ))
+        story.append(Spacer(1, 4))
+
+    story.append(Paragraph("In-Field Autonomous Operation", h3_style))
+    story.append(Paragraph(escape(full_res.in_field_assessment), body_style))
+
+    story.append(Paragraph("Public Road Transit Operation", h3_style))
+    story.append(Paragraph(escape(full_res.public_road_assessment), body_style))
+
+    story.append(Paragraph("Applicable Statutes &amp; Citations", h3_style))
+    if full_res.applicable_citations:
+        for cit in full_res.applicable_citations:
+            story.append(Paragraph(f"• {escape(cit)}", body_style))
+    else:
+        story.append(Paragraph("• None triggered in the verified corpus.", body_style))
+
+    story.append(Paragraph("Operational Caveats &amp; Requirements", h3_style))
+    for cav in full_res.plain_language_caveats:
+        story.append(Paragraph(f"• {escape(cav)}", body_style))
+
+    story.append(Paragraph("Recommended Operational Workaround", h3_style))
+    story.append(Paragraph(escape(full_res.recommended_workaround), body_style))
+
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(
+        "Disclaimer: RateOnomy provides decision-support analysis based on curated statutory and regulatory "
+        "records and does not constitute formal legal advice.",
+        muted_style,
+    ))
+
+    doc.build(story)
 
 # ---------------------------------------------------------------------------
 # UI
@@ -440,8 +783,8 @@ def setup_styles(root):
     style.configure("Accent.TButton", font=(FONT, 11, "bold"), foreground="white",
                     background=ACCENT, borderwidth=0, focusthickness=0, padding=(20, 9))
     style.map("Accent.TButton",
-              background=[("disabled", "#A9C4AF"), ("active", ACCENT_DARK), ("pressed", ACCENT_DARK)],
-              foreground=[("disabled", "#F2F5F1")])
+              background=[("disabled", "#C3CAC5"), ("active", ACCENT_DARK), ("pressed", ACCENT_DARK)],
+              foreground=[("disabled", "#F7F8F7")])
     style.configure("Secondary.TButton", font=(FONT, 10), foreground=TEXT,
                     background="#E4E9E3", borderwidth=0, focusthickness=0, padding=(14, 9))
     style.map("Secondary.TButton",
@@ -582,6 +925,44 @@ def render_icon(kind, color=ACCENT, bg=CARD):
     return img.resize((ICON_SIZE, ICON_SIZE), Image.Resampling.LANCZOS)
 
 
+STATUS_PENDING = "#3B82C4"  # blue ring: inputs not applied yet
+STATUS_DONE = ACCENT        # green check: inputs applied
+STATUS_ICON_SIZE = 16
+
+
+def render_status_icon(done):
+    """Small anti-aliased status badge with a transparent background (drawn large, then shrunk)."""
+    S = ICON_SCALE
+    size = STATUS_ICON_SIZE * S
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = 1 * S
+    if done:
+        d.ellipse([pad, pad, size - pad, size - pad], fill=STATUS_DONE)
+        w = round(2 * S)
+        pts = [(4.3 * S, 8.4 * S), (6.9 * S, 11.0 * S), (11.8 * S, 5.6 * S)]
+        d.line(pts, fill="white", width=w, joint="curve")
+        for x, y in (pts[0], pts[-1]):  # round the line ends
+            d.ellipse([x - w / 2, y - w / 2, x + w / 2, y + w / 2], fill="white")
+    else:
+        d.ellipse([pad, pad, size - pad, size - pad], outline=STATUS_PENDING, width=round(2 * S))
+    return img.resize((STATUS_ICON_SIZE, STATUS_ICON_SIZE), Image.Resampling.LANCZOS)
+
+
+def render_flow_arrow(color=MUTED, width=14, height=16):
+    """Anti-aliased right-pointing caret (chevron) with a transparent background."""
+    S = ICON_SCALE
+    W, H = width * S, height * S
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    lw = round(2 * S)
+    pts = [(4 * S, 3 * S), (10 * S, H / 2), (4 * S, H - 3 * S)]
+    d.line(pts, fill=color, width=lw, joint="curve")
+    for x, y in pts:  # round the ends and the tip
+        d.ellipse([x - lw / 2, y - lw / 2, x + lw / 2, y + lw / 2], fill=color)
+    return img.resize((width, height), Image.Resampling.LANCZOS)
+
+
 class ScoreIcon(tk.Label):
     """Smooth icon for a score card (see render_icon)."""
 
@@ -680,22 +1061,25 @@ AUTONOMY_FIELDS = [
     ("autLaborRate", "Labor rate ($/hr)", float, None),
 ]
 
+# Development convenience: prefill the ROI calculator with sample values.
+# Set to False to start with empty fields.
+PREFILL_ROI_EXAMPLE = True
+
 EXAMPLE_ROI_VALUES = {
     # Conventional: two tractors, one driver each
     "conEquipCost": 350000,
-    "conSubCost": 5000,          # autosteer / RTK
+    "conSubCost": 5000,
     "conNumMachines": 2,
     "conLaborRate": 22.0,
     # Autonomous: same tractors plus a retrofit kit
     "autEquipCost": 350000,
     "autRetroCost": 60000,
-    "autSubCost": 12000,         # autonomy software + RTK
+    "autSubCost": 12000,
     "autNumMachines": 2,
     "autMachinesPerOperator": 2,
-    "dedicatedTimeRaw": 25,      # operator supervises 25% of the time
-    "autLaborRate": 25.0,        # slightly higher wage for a skilled supervisor
+    "dedicatedTimeRaw": 25,
+    "autLaborRate": 25.0,
 }
-
 
 class ROIApp(tk.Toplevel):
     def __init__(self, master, on_result=None, font_family="Segoe UI"):
@@ -709,6 +1093,7 @@ class ROIApp(tk.Toplevel):
         self.payback_years = None
         self.on_result = on_result
         self.font_family = font_family
+        self.protocol("WM_DELETE_WINDOW", self.withdraw)
         self._setup_styles()
 
         header = tk.Frame(self, bg=HEADER)
@@ -728,16 +1113,16 @@ class ROIApp(tk.Toplevel):
         self._build_section(frame, "Autonomous Operations", AUTONOMY_FIELDS, 1)
         self._build_results(frame)
 
+        if PREFILL_ROI_EXAMPLE:
+            for key, value in EXAMPLE_ROI_VALUES.items():
+                self.entries[key].insert(0, str(value))
+
         btns = tk.Frame(frame, bg=BG)
         btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
-        ttk.Button(btns, text="Calculate", style="ROI.Accent.TButton",
-                   command=self.calculate).pack(side="left", padx=4)
-        ttk.Button(btns, text="For developers: Fill Example", style="ROI.Secondary.TButton",
-                   command=self.fill_example).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", style="ROI.Secondary.TButton",
                    command=self.clear).pack(side="left", padx=4)
-        ttk.Button(btns, text="Done", style="ROI.Secondary.TButton",
-                   command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(btns, text="Apply", style="ROI.Accent.TButton",
+                   command=self.apply).pack(side="right", padx=4)
 
     def _setup_styles(self):
         style = ttk.Style(self)
@@ -813,20 +1198,20 @@ class ROIApp(tk.Toplevel):
             aut = self._read(AUTONOMY_FIELDS)
         except ValueError as e:
             messagebox.showerror("Input error", str(e), parent=self)
-            return
+            return False
 
         if not 1 <= aut["dedicatedTimeRaw"] <= 100:
             messagebox.showerror("Input error", "Supervising time must be between 1 and 100.",
                                  parent=self)
-            return
+            return False
         if aut["autNumMachines"] <= 0:
             messagebox.showerror("Input error", "Number of machines must be greater than 0.",
                                  parent=self)
-            return
+            return False
         if aut["autMachinesPerOperator"] <= 0:
             messagebox.showerror("Input error", "Machines per operator must be greater than 0.",
                                  parent=self)
-            return
+            return False
 
         conTotalCost = (con["conEquipCost"] + con["conSubCost"]) * con["conNumMachines"]
         conLaborCost = con["conNumMachines"] * con["conLaborRate"]
@@ -862,13 +1247,12 @@ class ROIApp(tk.Toplevel):
 
         if self.on_result:
             self.on_result(self.payback_years, True)
+        return True
 
-    def fill_example(self):
-        """Fill every input with sample values (does not calculate)."""
-        for key, value in EXAMPLE_ROI_VALUES.items():
-            entry = self.entries[key]
-            entry.delete(0, tk.END)
-            entry.insert(0, str(value))
+    def apply(self):
+        if self.calculate():
+            self.withdraw()
+
 
     def clear(self):
         for entry in self.entries.values():
@@ -881,89 +1265,127 @@ class ROIApp(tk.Toplevel):
 
 
 class DrivabilityInputWindow(tk.Toplevel):
-    PREVIEW_MAX = (540, 250)  # fits inside the window
-
-    def __init__(self, master, image_path, field_area, on_apply):
+    def __init__(self, master, fields, on_apply):
         super().__init__(master)
         self.title("Drivability Inputs")
-        center_window(self, 620, 560)
-        self.resizable(False, False)
+        self.geometry("720x520")
+        self.minsize(620, 360)
         self.configure(bg=BG)
-        self.image_path = image_path
         self.on_apply = on_apply
-        self._preview_photo = None
+        self.fields = []
 
         header = tk.Frame(self, bg=HEADER)
         header.pack(fill="x")
         tk.Label(header, text="Drivability Inputs", font=(FONT, 18, "bold"),
                  fg="white", bg=HEADER).pack(anchor="w", padx=22, pady=(12, 2))
-        tk.Label(header, text="Choose a field image and enter its size",
+        tk.Label(header, text="Add field images and enter each field's size",
                  font=(FONT, 10), fg=HEADER_SUB, bg=HEADER).pack(
                      anchor="w", padx=22, pady=(0, 12)
                  )
 
-        content = tk.Frame(self, bg=BG)
-        content.pack(fill="both", expand=True, padx=20, pady=16)
+        toolbar = tk.Frame(self, bg=BG)
+        toolbar.pack(fill="x", padx=20, pady=(14, 8))
+        ttk.Button(toolbar, text="Add Field", style="Secondary.TButton",
+                   command=self.add_field).pack(side="left")
 
-        # Buttons first, pinned to the bottom, so nothing above can push them around
-        buttons = tk.Frame(content, bg=BG)
-        buttons.pack(side="bottom", fill="x", pady=(12, 0))
+        list_container = tk.Frame(self, bg=BG)
+        list_container.pack(fill="both", expand=True, padx=20)
+        canvas = tk.Canvas(list_container, bg=BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical",
+                                  command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.fields_frame = tk.Frame(canvas, bg=BG)
+        self.fields_window = canvas.create_window(
+            (0, 0), window=self.fields_frame, anchor="nw"
+        )
+        self.fields_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                self.fields_window, width=event.width
+            ),
+        )
+
+        buttons = tk.Frame(self, bg=BG)
+        buttons.pack(side="bottom", fill="x", padx=20, pady=14)
+        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
+                   command=self.destroy).pack(side="left", padx=4)
         ttk.Button(buttons, text="Apply", style="Accent.TButton",
                    command=self.apply).pack(side="right", padx=4)
-        ttk.Button(buttons, text="Cancel", style="Secondary.TButton",
-                   command=self.destroy).pack(side="right", padx=4)
 
-        image_row = tk.Frame(content, bg=BG)
-        image_row.pack(fill="x", pady=(0, 10))
-        ttk.Button(image_row, text="Select Field Image...",
-                   style="Secondary.TButton", command=self.select_image).pack(side="left")
-        self.image_var = tk.StringVar(value=self._image_label(image_path))
-        tk.Label(image_row, textvariable=self.image_var, font=(FONT, 10),
-                 fg=MUTED, bg=BG).pack(side="left", padx=12)
-
-        preview_card = make_card(content)
-        preview_card.pack(fill="both", expand=True)
-        tk.Label(preview_card, text="", font=(FONT, 9, "bold"),
-                 fg=MUTED, bg=CARD).pack(anchor="w", padx=12, pady=(8, 0))
-        self.preview_label = tk.Label(preview_card, bg=CARD, fg=MUTED, font=(FONT, 10))
-        self.preview_label.pack(fill="both", expand=True, padx=12, pady=(4, 12))
-
-        size_row = tk.Frame(content, bg=BG)
-        size_row.pack(fill="x", pady=(12, 0))
-        tk.Label(size_row, text="Field size (acres)", font=(FONT, 10),
-                 fg=TEXT, bg=BG).pack(side="left")
-        self.field_area_entry = ttk.Entry(size_row, width=14)
-        self.field_area_entry.pack(side="left", padx=(10, 0))
-        if field_area is not None:
-            self.field_area_entry.insert(0, str(field_area))
-
-
-
-        # Redraw the preview whenever the selected image changes
-        self.image_var.trace_add("write", lambda *_: self._show_preview(self.image_path))
-        self._show_preview(image_path)
+        for field in fields:
+            self.add_field(field["image_path"], field["field_area"])
+        if not self.fields:
+            self.add_field()
 
     @staticmethod
     def _image_label(image_path):
         return os.path.basename(image_path) if image_path else "No field image selected"
 
-    def _show_preview(self, path):
-        if not path:
-            self._preview_photo = None
-            self.preview_label.config(image="", text="No image selected")
-            return
-        try:
-            with Image.open(path) as img:
-                img = img.convert("RGB")  # handles RGBA PNGs and most TIFFs
-                img.thumbnail(self.PREVIEW_MAX, Image.Resampling.LANCZOS)
-                self._preview_photo = ImageTk.PhotoImage(img, master=self)
-        except Exception as exc:
-            self._preview_photo = None
-            self.preview_label.config(image="", text=f"Could not preview image: {exc}")
-            return
-        self.preview_label.config(image=self._preview_photo, text="")
+    def add_field(self, image_path=None, field_area=None):
+        row = tk.Frame(self.fields_frame, bg=CARD, padx=12, pady=8)
+        row.pack(fill="x", pady=4)
+        heading = tk.Frame(row, bg=CARD)
+        heading.pack(fill="x")
+        number_label = tk.Label(
+            heading, text="", font=(FONT, 10, "bold"), fg=TEXT, bg=CARD
+        )
+        number_label.pack(side="left", padx=(0, 10))
+        image_var = tk.StringVar(value=self._image_label(image_path))
+        ttk.Button(
+            heading,
+            text="Select Image...",
+            style="Secondary.TButton",
+            command=lambda: self.select_image(field),
+        ).pack(side="left")
+        tk.Label(heading, textvariable=image_var, font=(FONT, 9),
+                 fg=MUTED, bg=CARD).pack(side="left", padx=10, fill="x", expand=True)
+        ttk.Button(
+            heading,
+            text="Remove",
+            style="Secondary.TButton",
+            command=lambda: self.remove_field(field),
+        ).pack(side="right")
 
-    def select_image(self):
+        area_row = tk.Frame(row, bg=CARD)
+        area_row.pack(fill="x", pady=(8, 0))
+        tk.Label(area_row, text="Field size (acres)", font=(FONT, 10),
+                 fg=TEXT, bg=CARD).pack(side="left")
+        area_entry = ttk.Entry(area_row, width=14)
+        area_entry.pack(side="left", padx=(10, 0))
+        if field_area is not None:
+            area_entry.insert(0, str(field_area))
+
+        field = {
+            "frame": row,
+            "path": image_path,
+            "number_label": number_label,
+            "image_var": image_var,
+            "area_entry": area_entry,
+        }
+        self.fields.append(field)
+        self._renumber_fields()
+
+    def remove_field(self, field):
+        if len(self.fields) == 1:
+            field["path"] = None
+            field["image_var"].set(self._image_label(None))
+            field["area_entry"].delete(0, tk.END)
+        else:
+            self.fields.remove(field)
+            field["frame"].destroy()
+        self._renumber_fields()
+
+    def _renumber_fields(self):
+        for index, field in enumerate(self.fields, start=1):
+            field["number_label"].config(text=f"Field {index}")
+
+    def select_image(self, field):
         path = filedialog.askopenfilename(
             title="Select satellite image of field",
             filetypes=[("Images", "*.png *.jpg *.jpeg *.tif *.tiff"),
@@ -971,24 +1393,42 @@ class DrivabilityInputWindow(tk.Toplevel):
             parent=self,
         )
         if path:
-            self.image_path = path            # set before image_var so the trace sees it
-            self.image_var.set(self._image_label(path))
+            field["path"] = path
+            field["image_var"].set(self._image_label(path))
 
     def apply(self):
-        field_area = None
-        if self.image_path:
+        selected_fields = []
+        for index, field in enumerate(self.fields, start=1):
+            area_text = field["area_entry"].get().strip()
+            if not field["path"] and not area_text:
+                continue
+            if not field["path"]:
+                messagebox.showerror(
+                    "Input error", f"Select an image for Field {index}.", parent=self
+                )
+                return
             try:
-                field_area = float(self.field_area_entry.get().strip())
+                field_area = float(area_text)
             except ValueError:
-                messagebox.showerror("Input error", "Enter the field size in acres.",
-                                     parent=self)
+                messagebox.showerror(
+                    "Input error",
+                    f"Enter the field size in acres for Field {index}.",
+                    parent=self,
+                )
                 return
             if not math.isfinite(field_area) or field_area <= 0:
-                messagebox.showerror("Input error", "Field size must be greater than 0 acres.",
-                                     parent=self)
+                messagebox.showerror(
+                    "Input error",
+                    f"Field {index} size must be greater than 0 acres.",
+                    parent=self,
+                )
                 return
+            selected_fields.append({
+                "image_path": field["path"],
+                "field_area": field_area,
+            })
 
-        self.on_apply(self.image_path, field_area)
+        self.on_apply(selected_fields)
         self.destroy()
 
 class LegalInputWindow(tk.Toplevel):
@@ -1130,7 +1570,19 @@ class LegalReportWindow(tk.Toplevel):
                  fg=HEADER_SUB, bg=HEADER, wraplength=630, justify="left").pack(
                      anchor="w", padx=20, pady=(0, 12)
                  )
-
+        if "fallback" in res.model_used.lower():
+            banner = tk.Frame(self, bg="#FFF3CD", highlightbackground="#FFEEBA", highlightthickness=1)
+            banner.pack(fill="x", padx=18, pady=(12, 0))
+            tk.Label(
+                banner,
+                text="⚠ Gemini API timed out — showing deterministic corpus summary. "
+                     "Your score, grade, citations, and ROI flags remain 100% accurate.",
+                font=(FONT, 9, "bold"),
+                fg="#856404",
+                bg="#FFF3CD",
+                wraplength=630,
+                justify="left",
+            ).pack(anchor="w", padx=12, pady=8)
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=18, pady=14)
 
@@ -1157,8 +1609,8 @@ class RateOnomyApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("RateOnomy - Autonomy Decision Support")
-        center_window(self, 980, 760)
-        self.minsize(920, 720)
+        center_window(self, 1160, 900)
+        self.minsize(1100, 860)
         self.configure(bg=BG)
         global FONT
         FONT = pick_font()
@@ -1169,6 +1621,7 @@ class RateOnomyApp(tk.Tk):
         self.drivability_window = None
         self.legal_window = None
         self.legal_profile = None
+        self.last_assessment = None
         self.last_legal_result = None
 
         # Header banner
@@ -1183,32 +1636,50 @@ class RateOnomyApp(tk.Tk):
         body.pack(fill="both", expand=True, padx=20, pady=16)
 
         # Controls card: input windows on the left, actions on the right
-        self.image_path = None
-        self.field_area = None
+        self.drivability_fields = []
         self.image_var = tk.StringVar(value="")
         controls = make_card(body)
         controls.pack(fill="x")
         cin = tk.Frame(controls, bg=CARD)
         cin.pack(fill="x", padx=16, pady=12)
+        # Flow: ROI -> Drivability -> Legal -> Run Assessment
+        self._arrow_icon = ImageTk.PhotoImage(render_flow_arrow(), master=self)
+
+        def flow_arrow():
+            tk.Label(cin, image=self._arrow_icon, bg=CARD, bd=0).pack(side="left", padx=6)
+
         self.roi_btn = ttk.Button(cin, text="ROI Calculator",
                       style="Secondary.TButton",
                       command=self.open_roi_calculator)
-        self.roi_btn.pack(side="left", padx=(0, 8))
+        self.roi_btn.pack(side="left")
+        flow_arrow()
         self.drivability_btn = ttk.Button(
             cin, text="Drivability Inputs...", style="Secondary.TButton",
             command=self.open_drivability_inputs,
         )
         self.drivability_btn.pack(side="left")
+        flow_arrow()
         self.legal_btn = ttk.Button(
             cin, text="Legal Inputs...", style="Secondary.TButton",
             command=self.open_legal_inputs,
         )
-        self.legal_btn.pack(side="left", padx=(8, 0))
-        tk.Label(cin, textvariable=self.image_var, font=(FONT, 10), fg=MUTED,
-                 bg=CARD).pack(side="left", padx=12)
+        self.legal_btn.pack(side="left")
+        flow_arrow()
         self.run_btn = ttk.Button(cin, text="Run Assessment", style="Accent.TButton",
                                   command=self.run_assessment)
-        self.run_btn.pack(side="right")
+        self.run_btn.pack(side="left")
+        tk.Label(cin, textvariable=self.image_var, font=(FONT, 10), fg=MUTED,
+                 bg=CARD).pack(side="left", padx=12)
+
+        # Status badge inside each input button: blue ring = not applied, green check = applied
+        self._status_icons = {
+            done: ImageTk.PhotoImage(render_status_icon(done), master=self)
+            for done in (False, True)
+        }
+        for btn in (self.roi_btn, self.drivability_btn, self.legal_btn):
+            btn.config(compound="left")
+        self._running = False
+        self._update_input_status()
         self.clear_btn = ttk.Button(cin, text="Clear", style="Secondary.TButton",
                                     command=self.clear)
         self.clear_btn.pack(side="right", padx=(0, 10))
@@ -1228,6 +1699,10 @@ class RateOnomyApp(tk.Tk):
         self.cancel_btn = ttk.Button(self.status_frame, text="Cancel",
                                      style="Secondary.TButton", command=self.cancel_assessment)
         self.cancel_btn.pack(side="left")
+
+        # Composite card (packed bottom-first so it is never clipped)
+        comp = make_card(body)
+        comp.pack(side="bottom", fill="x", pady=(12, 0))
 
         # Three component panels
         panels = tk.Frame(body, bg=BG)
@@ -1253,8 +1728,7 @@ class RateOnomyApp(tk.Tk):
             panel.set_summary_height(tallest)
 
         # Composite card
-        comp = make_card(body)
-        comp.pack(fill="x", pady=(12, 0))
+
         cin = tk.Frame(comp, bg=CARD)
         cin.pack(fill="x", padx=20, pady=14)
 
@@ -1277,18 +1751,32 @@ class RateOnomyApp(tk.Tk):
         right.pack(side="left", fill="x", expand=True)
         self.composite_bar = GradeBar(right)
         self.composite_bar.pack(fill="x", pady=(4, 6))
-        self.feasibility_label = tk.Label(right, text="", font=(FONT, 10, "bold"),
+
+        status_row = tk.Frame(right, bg=CARD)
+        status_row.pack(fill="x", pady=(0, 6))
+        self.feasibility_label = tk.Label(status_row, text="", font=(FONT, 10, "bold"),
                                           fg="white", bg=CARD)
-        self.feasibility_label.pack(anchor="w", pady=(0, 6))
+        self.feasibility_label.pack(side="left")
+
+        self.export_pdf_btn = ttk.Button(
+            status_row,
+            text="Export PDF Report...",
+            style="Secondary.TButton",
+            command=self.export_pdf_report,
+            state="disabled",
+        )
+        self.export_pdf_btn.pack(side="right")
+
         tk.Label(
             right,
-            text="Weighted average of the three scores. Legal feasibility is reported "
-                 "separately so a high composite cannot hide a legal restriction.",
+            text="Your overall feasibility score. Legal feasibility is reported "
+                 "separately, but still included in the overall score.",
             font=(FONT, 9), fg=MUTED, bg=CARD, wraplength=520, justify="left",
         ).pack(anchor="w")
 
     def open_roi_calculator(self):
         if self.roi_window is not None and self.roi_window.winfo_exists():
+            self.roi_window.deiconify()
             self.roi_window.lift()
             self.roi_window.focus_force()
             return
@@ -1298,13 +1786,40 @@ class RateOnomyApp(tk.Tk):
         self.roi_window.transient(self)
 
     def _on_roi_result(self, payback_years, calculated):
+        # Only store the inputs; all three panels update together in Run Assessment.
         self.roi_payback_years = payback_years
         self.roi_calculated = calculated
-        if calculated:
-            result = compute_roi_score(payback_years)
-            self.roi_panel.update_result(result, grade_from_score(result["score"]))
-        else:
-            self.roi_panel.clear()
+        self._clear_results()
+        self._update_input_status()
+
+    def _update_input_status(self):
+        """Show which input windows have been applied with valid inputs."""
+        states = (
+            (self.roi_btn, self.roi_calculated),
+            (self.drivability_btn, bool(self.drivability_fields)),
+            (self.legal_btn, self.legal_profile is not None),
+        )
+        for btn, done in states:
+            btn.config(image=self._status_icons[done])
+        # Run Assessment is grey until the required inputs are applied (drivability is optional)
+        if not self._running:
+            self.run_btn.config(state="normal" if self._inputs_ready() else "disabled")
+
+    def _inputs_ready(self):
+        return self.roi_calculated and self.legal_profile is not None
+
+    def _clear_results(self):
+        """Blank every result panel and the composite so stale numbers never look current."""
+        for panel in (self.roi_panel, self.driv_panel, self.legal_panel):
+            panel.clear()
+        self.composite_label.config(text="--", fg=PENDING)
+        self.composite_badge.config(text="-", bg=PENDING)
+        self.composite_bar.set(0, PENDING)
+        self.feasibility_label.config(text="", bg=CARD)
+        self.legal_panel.summary_label.config(text=SUMMARIES["legal"])
+        self.last_legal_result = None
+        self.last_assessment = None
+        self.export_pdf_btn.config(state="disabled")
 
     def open_drivability_inputs(self):
         if self.drivability_window is not None and self.drivability_window.winfo_exists():
@@ -1312,14 +1827,17 @@ class RateOnomyApp(tk.Tk):
             self.drivability_window.focus_force()
             return
         self.drivability_window = DrivabilityInputWindow(
-            self, self.image_path, self.field_area, self._on_drivability_inputs
+            self, self.drivability_fields, self._on_drivability_inputs
         )
         self.drivability_window.transient(self)
 
-    def _on_drivability_inputs(self, image_path, field_area):
-        self.image_path = image_path
-        self.field_area = field_area
-        self.image_var.set(os.path.basename(image_path) if image_path else "")
+    def _on_drivability_inputs(self, fields):
+        self.drivability_fields = fields
+        self.image_var.set(
+            f"{len(fields)} field image(s) selected" if fields else ""
+        )
+        self._clear_results()
+        self._update_input_status()
 
     def open_legal_inputs(self):
         if self.legal_window is not None and self.legal_window.winfo_exists():
@@ -1334,6 +1852,8 @@ class RateOnomyApp(tk.Tk):
     def _on_legal_inputs(self, profile: FarmerProfile):
         self.legal_profile = profile
         self.legal_btn.config(text=f"Legal Inputs ({profile.state})...")
+        self._clear_results()
+        self._update_input_status()
 
     def open_legal_report(self):
         if self.last_legal_result is not None:
@@ -1343,14 +1863,19 @@ class RateOnomyApp(tk.Tk):
     def _set_running(self, running):
         self._running = running
         state = "disabled" if running else "normal"
-        for btn in (self.run_btn, self.clear_btn, self.drivability_btn, self.roi_btn, self.legal_btn):
+        for btn in (self.clear_btn, self.drivability_btn, self.roi_btn, self.legal_btn):
             btn.config(state=state)
+        if running:
+            self.run_btn.config(state="disabled")
+        else:
+            self._update_input_status()
         if running:
             self.status_var.set("Running assessment...")
             self.cancel_btn.config(state="normal")
             self.status_frame.pack(side="right", padx=(0, 16))
             self.spinner.start()
             self.config(cursor="watch")
+            self.export_pdf_btn.config(state="disabled")
         else:
             self.spinner.stop()
             self.status_frame.pack_forget()
@@ -1359,21 +1884,10 @@ class RateOnomyApp(tk.Tk):
     def run_assessment(self):
         if self._running:
             return
-        if not self.roi_calculated:
-            messagebox.showerror(
-                "ROI required",
-                "Open the ROI Calculator and click Calculate before running the assessment.",
-            )
-            return
-        if self.legal_profile is None:
-            messagebox.showerror(
-                "Legal inputs required",
-                "Open 'Legal Inputs...' and click Apply before running the assessment.",
-            )
-            return
-        image_path = self.image_path
+        if not self._inputs_ready():
+            return  # button is greyed out until inputs are applied
         roi_payback_years = self.roi_payback_years
-        field_area = self.field_area
+        drivability_fields = list(self.drivability_fields)
         legal_profile = self.legal_profile
 
         self._set_running(True)
@@ -1387,7 +1901,9 @@ class RateOnomyApp(tk.Tk):
             # Do not touch any tkinter widgets in here; send status text through the queue.
             try:
                 self._outcome["roi"] = compute_roi_score(roi_payback_years)
-                self._outcome["driv"] = compute_drivability_score(image_path, field_area)
+                self._outcome["driv"] = compute_drivability_score_for_fields(
+                    drivability_fields
+                )
                 if cancel_event.is_set():
                     raise AssessmentCancelled("Assessment cancelled.")
                 self._outcome["legal"] = compute_legal_score(
@@ -1457,10 +1973,43 @@ class RateOnomyApp(tk.Tk):
         feasible = legal["feasible"]
         pill_color = ACCENT if feasible.lower().startswith("legally feasible") else DANGER
         self.feasibility_label.config(text=f"  {feasible}  ", bg=pill_color)
+        self.last_assessment = {
+            "roi": roi,
+            "driv": driv,
+            "legal": legal,
+            "composite": composite,
+            "composite_grade": grade,
+            "profile": self.legal_profile,
+            "image_paths": [f["image_path"] for f in self.drivability_fields],
+        }
+        self.export_pdf_btn.config(state="normal")
+
+    def export_pdf_report(self):
+        if self.last_assessment is None:
+            return
+        state_code = self.last_assessment["profile"].state
+        default_name = f"RateOnomy_Report_{state_code}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        filepath = filedialog.asksaveasfilename(
+            title="Save RateOnomy PDF Report",
+            defaultextension=".pdf",
+            initialfile=default_name,
+            filetypes=[("PDF Document", "*.pdf")],
+            parent=self,
+        )
+        if not filepath:
+            return
+        try:
+            export_assessment_pdf(filepath, self.last_assessment)
+            messagebox.showinfo(
+                "PDF Exported",
+                f"Report successfully saved to:\n{filepath}",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("PDF Export Error", str(exc), parent=self)
 
     def clear(self):
-        self.image_path = None
-        self.field_area = None
+        self.drivability_fields = []
         self.image_var.set("")
         if self.drivability_window is not None and self.drivability_window.winfo_exists():
             self.drivability_window.destroy()
@@ -1468,19 +2017,12 @@ class RateOnomyApp(tk.Tk):
             self.roi_window.clear()
         else:
             self._on_roi_result(None, False)
-        for panel in (self.roi_panel, self.driv_panel, self.legal_panel):
-            panel.clear()
-        self.composite_label.config(text="--", fg=PENDING)
-        self.composite_badge.config(text="-", bg=PENDING)
-        self.composite_bar.set(0, PENDING)
-        self.feasibility_label.config(text="", bg=CARD)
+        self._clear_results()
         self.legal_profile = None
-        self.last_legal_result = None
         self.legal_btn.config(text="Legal Inputs...")
-        self.legal_panel.summary_label.config(text=SUMMARIES["legal"])
+        self._update_input_status()
         if self.legal_window is not None and self.legal_window.winfo_exists():
             self.legal_window.destroy()
-
 
 if __name__ == "__main__":
     prompt_for_api_keys()

@@ -1,5 +1,6 @@
 import json
 import time
+import os
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
 
@@ -33,16 +34,17 @@ MAX_RETRY_SECONDS = 600             # stop after 10 minutes even if nobody cance
 GRADE_TO_SCORE = {
     "A": 95,
     "B": 80,
-    "C": 65,
-    "D": 45,
+    "C": 70,
+    "D": 60,
     "F": 15,
 }
 
 # Ordered from newest Flash model to fast fallback Flash models
 CANDIDATE_MODELS = [
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
 ]
 
 FEDERAL_OSHA_STATES = {"IL", "TX"}
@@ -119,6 +121,34 @@ def is_osha_small_farm_exempt(farmer: FarmerProfile) -> bool:
         and not farmer.temporary_labor_camp
     )
 
+def compute_deterministic_grade(
+    farmer: FarmerProfile,
+    matched_rules: List[RegulatoryRule],
+) -> tuple[Literal["PERMITTED", "CONDITIONAL", "PROHIBITED"], Literal["A", "B", "C", "D", "F"]]:
+    """Deterministically compute feasibility and letter grade from triggered rules."""
+    in_field_blocked = any(
+        r.category == "in_field_supervision"
+        and farmer.supervision_mode in r.applicability.blocked_supervision_modes
+        for r in matched_rules
+    )
+    road_blocked = farmer.public_road_transit and any(
+        r.category == "public_road_transit"
+        and farmer.supervision_mode in r.applicability.blocked_supervision_modes
+        for r in matched_rules
+    )
+    has_conditional_guidance = any(
+        r.legal_status == "AGENCY_GUIDANCE" for r in matched_rules
+    )
+
+    if in_field_blocked and road_blocked:
+        return "PROHIBITED", "F"   # 15: Blocked both in-field and on public roads
+    if in_field_blocked:
+        return "PROHIBITED", "D"   # 45: Blocked in-field (core farm activity prohibited)
+    if road_blocked and has_conditional_guidance:
+        return "CONDITIONAL", "C"  # 65: In-field requires strict exclusion + road transit blocked
+    if road_blocked or has_conditional_guidance:
+        return "CONDITIONAL", "B"  # 80: Permitted with single operational workaround (e.g., manual road drive)
+    return "PERMITTED", "A"        # 95: No enacted restrictions block the requested operation
 
 def filter_applicable_rules(
     farmer: FarmerProfile,
@@ -211,6 +241,7 @@ def evaluate_regulatory_compliance(
 
     report("Filtering enacted rules & checking OSHA small-farm exemption...")
     applicable_rules, exempt, roi_handoff = filter_applicable_rules(farmer, corpus)
+    feasibility, letter_grade = compute_deterministic_grade(farmer, applicable_rules)
     report(
         f"Matched {len(applicable_rules)} verified rule(s) "
         f"[OSHA Exempt: {'Yes' if exempt else 'No'}]."
@@ -283,15 +314,23 @@ def evaluate_regulatory_compliance(
         f"{farmer.model_dump_json(indent=2)}\n\n"
         f"FEDERAL OSHA SMALL-FARM EXEMPT STATUS: {exempt}\n\n"
         f"APPLICABLE VERIFIED ENACTED RULES:\n"
+        f"LOCKED GRADE: {letter_grade} ({feasibility}) — explain why this grade applies.\n"
         f"{json.dumps(rules_payload, indent=2)}"
     )
 
-    # Cap each HTTP call at 20s and disable hidden SDK retries so failover is immediate
-    client = genai.Client(
-        http_options=types.HttpOptions(
-            timeout=20_000,
-            retry_options=types.HttpRetryOptions(attempts=1),
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip().strip("'\"")
+    if not api_key or api_key == "NONE":
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing or still set to 'NONE' in your .env file. "
+            "Update .env next to app.py with a valid Google AI Studio key."
         )
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=30_000,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
     )
 
     def check_cancel() -> None:
@@ -308,7 +347,7 @@ def evaluate_regulatory_compliance(
 
     while True:
         round_num += 1
-        all_rate_limited = True
+        any_transient = False  # did any model fail in a way worth retrying (5xx / timeout)?
 
         for model_name in CANDIDATE_MODELS:
             check_cancel()
@@ -322,43 +361,44 @@ def evaluate_regulatory_compliance(
                         response_mime_type="application/json",
                         response_schema=GeminiRegulatoryAssessment,
                         temperature=0.0,
-                        thinking_config=types.ThinkingConfig(thinking_level="LOW"),
                     ),
                 )
                 used_model = model_name
                 break
             except APIError as err:
                 last_error = err
+                if "API_KEY" in str(err).upper():
+                    raise  # bad key: show the real error instead of silently falling back
+                if err.code in (400, 404):
+                    report(f"{model_name} not usable (HTTP {err.code}), trying next model...")
+                    continue
                 if err.code == RATE_LIMIT_CODE:
-                    report(f"{model_name} unavailable, trying next model...")
+                    report(f"{model_name} rate-limited, trying next model...")
                     continue
                 if err.code in RETRYABLE_CODES:
-                    all_rate_limited = False
+                    any_transient = True
                     report(f"{model_name} busy (HTTP {err.code}), trying next model...")
                     continue
-                raise  # 400/401/403 etc. won't fix themselves
+                raise
             except Exception as err:  # timeouts / connection errors from whatever HTTP library the SDK uses
                 last_error = err
-                all_rate_limited = False
+                any_transient = True
                 report(f"{model_name} timed out, trying next model...")
                 continue
 
         if response is not None:
             break
 
-        # Every model failed this round
-        if all_rate_limited:
+        # Every model failed this round. Give up (and use the deterministic fallback below)
+        # if nothing was retryable for a few rounds, or if we've hit the time limit.
+        if not any_transient:
             rate_limit_rounds += 1
             if rate_limit_rounds >= MAX_RATE_LIMIT_ROUNDS:
-                raise RuntimeError(
-                    "Gemini rate limit or quota reached. Try again later. "
-                    f"Last error: {last_error}"
-                )
+                report("Gemini unavailable (rate limit / model errors), using offline assessment...")
+                break
         if time.monotonic() + delay > deadline:
-            raise RuntimeError(
-                f"Gemini still unavailable after {MAX_RETRY_SECONDS // 60} minutes. "
-                f"Last error: {last_error}"
-            )
+            report("Gemini still unavailable, using offline assessment...")
+            break
 
         # Wait before the next round, counting down and checking for cancel every second
         for remaining in range(delay, 0, -1):
@@ -371,24 +411,86 @@ def evaluate_regulatory_compliance(
                 time.sleep(1)
         delay = min(delay * 2, BACKOFF_MAX_S)
 
-    report("Parsing structured regulatory assessment...")
-    assessment: GeminiRegulatoryAssessment = response.parsed
-    numeric_score = GRADE_TO_SCORE[assessment.letter_grade]
+    numeric_score = GRADE_TO_SCORE[letter_grade]
     elapsed = round(time.perf_counter() - start_time, 2)
 
+    def _build_local_fallback(reason: str) -> PipelineBResult:
+        in_field_rules = [r for r in applicable_rules if r.category != "public_road_transit"]
+        road_rules = [r for r in applicable_rules if r.category == "public_road_transit"]
+        workarounds = [r.operational_workaround for r in applicable_rules if r.operational_workaround]
+
+        return PipelineBResult(
+            feasibility=feasibility,
+            letter_grade=letter_grade,
+            numeric_score=numeric_score,
+            weighted_contribution=round(numeric_score * legal_weight, 2),
+            osha_small_farm_exempt=exempt,
+            model_used=f"deterministic-fallback ({reason})",
+            elapsed_seconds=elapsed,
+            headline_summary=f"Rated {letter_grade} ({feasibility}) under {farmer.state} and federal rules (local corpus fallback).",
+            in_field_assessment=(
+                " ".join(r.constraint_summary for r in in_field_rules)
+                if in_field_rules
+                else f"No enacted state or federal restrictions prohibit autonomous {farmer.activity} inside private fields in {farmer.state}."
+            ),
+            public_road_assessment=(
+                "No public road transit was requested for this operation."
+                if not farmer.public_road_transit
+                else (
+                    " ".join(r.constraint_summary for r in road_rules)
+                    if road_rules
+                    else f"No autonomous public-road prohibitions were triggered for {farmer.state}."
+                )
+            ),
+            applicable_citations=[r.citation for r in applicable_rules],
+            plain_language_caveats=[
+                f"[{'Public Road' if r.category == 'public_road_transit' else 'In-Field'}] {r.constraint_summary}"
+                for r in applicable_rules
+            ],
+            recommended_workaround=" ".join(
+                workarounds) if workarounds else "Follow standard manufacturer safety protocols.",
+            roi_handoff=roi_handoff,
+        )
+
+    # 1. Fallback if all cloud LLM endpoints timed out or were overloaded
+    if response is None:
+        return _build_local_fallback("API timeout")
+
+    # 2. Parse Gemini's structured output (with backup raw-text JSON parse)
+    report("Parsing structured regulatory assessment...")
+    assessment: Optional[GeminiRegulatoryAssessment] = getattr(response, "parsed", None)
+
+    if assessment is None and getattr(response, "text", None):
+        raw_text = (
+            response.text.strip()
+            .removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
+        try:
+            assessment = GeminiRegulatoryAssessment.model_validate_json(raw_text)
+        except Exception:  # noqa: BLE001
+            assessment = None
+
+    # 3. Fallback if the model returned empty or unparseable output
+    if assessment is None:
+        return _build_local_fallback(f"{used_model} empty response")
+
+    # 4. Normal return when Gemini succeeds
     return PipelineBResult(
-        feasibility=assessment.feasibility,
-        letter_grade=assessment.letter_grade,
+        feasibility=feasibility,
+        letter_grade=letter_grade,
         numeric_score=numeric_score,
         weighted_contribution=round(numeric_score * legal_weight, 2),
         osha_small_farm_exempt=exempt,
         model_used=used_model,
         elapsed_seconds=elapsed,
         headline_summary=assessment.headline_summary,
+        in_field_assessment=assessment.in_field_assessment,
+        public_road_assessment=assessment.public_road_assessment,
         applicable_citations=assessment.applicable_citations,
         plain_language_caveats=assessment.plain_language_caveats,
         recommended_workaround=assessment.recommended_workaround,
         roi_handoff=roi_handoff,
-        in_field_assessment=assessment.in_field_assessment,
-        public_road_assessment=assessment.public_road_assessment,
     )
