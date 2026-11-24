@@ -16,6 +16,22 @@ from inference_sdk import InferenceHTTPClient, InferenceConfiguration
 from pipeline_b import PipelineBResult, evaluate_regulatory_compliance
 from schema import FarmerProfile
 
+from datetime import datetime
+from html import escape
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+
 CORPUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regulatory_corpus.json")
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(ENV_PATH)
@@ -281,6 +297,7 @@ def compute_legal_score(farmer_profile: FarmerProfile | None = None):
     res: PipelineBResult = evaluate_regulatory_compliance(
         farmer=farmer_profile,
         corpus_path=CORPUS_PATH,
+        legal_weight=WEIGHTS["legal"],
     )
 
     label, feasible_text = FEASIBILITY_DISPLAY[res.feasibility]
@@ -331,6 +348,235 @@ def compute_composite(roi, drivability, legal):
         + WEIGHTS["legal"] * legal
     )
 
+def export_assessment_pdf(filepath: str, assessment: dict) -> None:
+    """Generate a formatted PDF report of the RateOnomy assessment results."""
+    roi = assessment["roi"]
+    driv = assessment["driv"]
+    legal = assessment["legal"]
+    composite = assessment["composite"]
+    comp_grade = assessment["composite_grade"]
+    profile: FarmerProfile = assessment["profile"]
+    full_res: PipelineBResult = legal["full_result"]
+    roi_pct = round(WEIGHTS["roi"] * 100)
+    driv_pct = round(WEIGHTS["drivability"] * 100)
+    legal_pct = round(WEIGHTS["legal"] * 100)
+
+    doc = SimpleDocTemplate(
+        filepath,
+        pagesize=letter,
+        leftMargin=0.65 * inch,
+        rightMargin=0.65 * inch,
+        topMargin=0.6 * inch,
+        bottomMargin=0.6 * inch,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Heading1"],
+        fontSize=20,
+        leading=24,
+        textColor=colors.white,
+        spaceAfter=2,
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSub",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#CFE3D3"),
+    )
+    h2_style = ParagraphStyle(
+        "SectionHeader",
+        parent=styles["Heading2"],
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#2F5D3A"),
+        spaceBefore=12,
+        spaceAfter=6,
+    )
+    h3_style = ParagraphStyle(
+        "SubHeader",
+        parent=styles["Heading3"],
+        fontSize=10.5,
+        leading=14,
+        textColor=colors.HexColor("#1F2A24"),
+        spaceBefore=8,
+        spaceAfter=3,
+    )
+    body_style = ParagraphStyle(
+        "BodyTextCustom",
+        parent=styles["Normal"],
+        fontSize=9.5,
+        leading=13.5,
+        textColor=colors.HexColor("#1F2A24"),
+    )
+    muted_style = ParagraphStyle(
+        "MutedText",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=11.5,
+        textColor=colors.HexColor("#6B7770"),
+    )
+
+    story = []
+
+    # --- Header Banner ---
+    timestamp = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    banner_data = [[
+        Paragraph("RateOnomy — Autonomy Decision Support Report", title_style),
+    ], [
+        Paragraph(
+            f"Generated {escape(timestamp)}  |  Jurisdiction: {escape(profile.state)}  |  "
+            f"Activity: {escape(profile.activity.title())}  |  "
+            f"Supervision: {escape(profile.supervision_mode.replace('_', ' '))}",
+            subtitle_style,
+        ),
+    ]]
+    banner_tbl = Table(banner_data, colWidths=[7.2 * inch])
+    banner_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#2F5D3A")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (0, 0), 12),
+        ("BOTTOMPADDING", (0, -1), (0, -1), 12),
+    ]))
+    story.append(banner_tbl)
+    story.append(Spacer(1, 12))
+
+    # --- Overall Composite Score & Legal Feasibility Conditions ---
+    story.append(Paragraph("1. Overall Composite Score &amp; Legal Feasibility", h2_style))
+
+    feasible_text = legal["feasible"]
+    is_feasible = feasible_text.lower().startswith("legally feasible")
+    status_bg = colors.HexColor("#E8F5E9") if is_feasible else colors.HexColor("#FDEDEC")
+    status_fg = "#1B7A3D" if is_feasible else "#C0392B"
+
+    # Build explicit operational conditions list
+    conditions = [f"Legal Status: {feasible_text} (Grade {legal['grade']} — {legal['label']})"]
+    if full_res.roi_handoff.requires_human_road_transport:
+        conditions.append("Condition: Human operator or trailer required for public road transit between fields.")
+    if full_res.roi_handoff.min_supervision_pct_override is not None:
+        conditions.append(
+            f"Condition: Minimum {full_res.roi_handoff.min_supervision_pct_override}% human supervision required."
+        )
+    if profile.state == "CA" and not profile.employee_zone_exposure:
+        conditions.append("Condition: Strict perimeter isolation required (zero employee access to zone of danger).")
+    if full_res.osha_small_farm_exempt:
+        conditions.append("Exemption: Federal OSHA small-farm enforcement exemption applies (<=10 non-family workers, no TLC).")
+
+    conditions_html = "<br/>".join(f"• {escape(c)}" for c in conditions)
+
+    comp_table = Table(
+        [
+            [
+                Paragraph(
+                    f"<b>Composite Autonomy Score</b><br/>"
+                    f"<font size=22 color='#2F5D3A'><b>{composite:.1f} / 10</b></font>  "
+                    f"<b>(Grade {escape(comp_grade)})</b><br/>"
+                    f"<font size=8 color='#6B7770'>Weights: {roi_pct}% ROI + "
+                    f"{driv_pct}% Drivability + {legal_pct}% Legal</font>",
+                    body_style,
+                ),
+                Paragraph(
+                    f"<b><font color='{status_fg}'>Compliance &amp; Conditions Summary</font></b><br/>"
+                    f"{conditions_html}",
+                    body_style,
+                ),
+            ]
+        ],
+        colWidths=[2.6 * inch, 4.6 * inch],
+    )
+    comp_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#F2F5F1")),
+        ("BACKGROUND", (1, 0), (1, 0), status_bg),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#DCE3DC")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.75, colors.HexColor("#DCE3DC")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(comp_table)
+    story.append(Spacer(1, 10))
+
+    # --- Three Component Breakdowns ---
+    story.append(Paragraph("2. Component Scores Breakdown", h2_style))
+
+    components = [
+        (f"ROI Component ({roi_pct}% Weight)", roi, grade_from_score(roi["score"])),
+        (f"Drivability Component ({driv_pct}% Weight)", driv, grade_from_score(driv["score"])),
+        (f"Legal Feasibility Component ({legal_pct}% Weight)", legal, legal["grade"]),
+    ]
+
+    for comp_title, comp_data, comp_ltr in components:
+        rows = [[
+            Paragraph(
+                f"<b>{escape(comp_title)}</b> — Score: <b>{comp_data['score']:.1f} / 10</b> (Grade {escape(comp_ltr)})",
+                body_style,
+            ),
+            "",
+        ], [
+            Paragraph(f"<i>{escape(comp_data['summary'])}</i>", muted_style),
+            "",
+        ]]
+        for k, v in comp_data["details"]:
+            rows.append([
+                Paragraph(escape(str(k)), muted_style),
+                Paragraph(f"<b>{escape(str(v))}</b>", body_style),
+            ])
+
+        tbl = Table(rows, colWidths=[2.6 * inch, 4.6 * inch])
+        tbl.setStyle(TableStyle([
+            ("SPAN", (0, 0), (1, 0)),
+            ("SPAN", (0, 1), (1, 1)),
+            ("BACKGROUND", (0, 0), (1, 0), colors.HexColor("#E6EBE5")),
+            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
+            ("LINEBELOW", (0, 1), (1, 1), 0.6, colors.HexColor("#DCE3DC")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 8))
+
+    # --- Detailed Regulatory Compliance Report ---
+    story.append(Paragraph("3. Detailed Regulatory Compliance Report", h2_style))
+
+    if "fallback" in full_res.model_used.lower():
+        story.append(Paragraph(
+            "<i>Note: Generated via local deterministic corpus fallback due to cloud API timeout. "
+            "Scores, citations, and compliance flags remain fully verified.</i>",
+            muted_style,
+        ))
+        story.append(Spacer(1, 4))
+
+    story.append(Paragraph("In-Field Autonomous Operation", h3_style))
+    story.append(Paragraph(escape(full_res.in_field_assessment), body_style))
+
+    story.append(Paragraph("Public Road Transit Operation", h3_style))
+    story.append(Paragraph(escape(full_res.public_road_assessment), body_style))
+
+    story.append(Paragraph("Applicable Statutes &amp; Citations", h3_style))
+    if full_res.applicable_citations:
+        for cit in full_res.applicable_citations:
+            story.append(Paragraph(f"• {escape(cit)}", body_style))
+    else:
+        story.append(Paragraph("• None triggered in the verified corpus.", body_style))
+
+    story.append(Paragraph("Operational Caveats &amp; Requirements", h3_style))
+    for cav in full_res.plain_language_caveats:
+        story.append(Paragraph(f"• {escape(cav)}", body_style))
+
+    story.append(Paragraph("Recommended Operational Workaround", h3_style))
+    story.append(Paragraph(escape(full_res.recommended_workaround), body_style))
+
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(
+        "Disclaimer: RateOnomy provides decision-support analysis based on curated statutory and regulatory "
+        "records and does not constitute formal legal advice.",
+        muted_style,
+    ))
+
+    doc.build(story)
 
 # ---------------------------------------------------------------------------
 # UI
@@ -1052,6 +1298,7 @@ class RateOnomyApp(tk.Tk):
         self.drivability_window = None
         self.legal_window = None
         self.legal_profile = None
+        self.last_assessment = None
         self.last_legal_result = None
 
         # Header banner
@@ -1154,9 +1401,22 @@ class RateOnomyApp(tk.Tk):
         right.pack(side="left", fill="x", expand=True)
         self.composite_bar = GradeBar(right)
         self.composite_bar.pack(fill="x", pady=(4, 6))
-        self.feasibility_label = tk.Label(right, text="", font=(FONT, 10, "bold"),
+
+        status_row = tk.Frame(right, bg=CARD)
+        status_row.pack(fill="x", pady=(0, 6))
+        self.feasibility_label = tk.Label(status_row, text="", font=(FONT, 10, "bold"),
                                           fg="white", bg=CARD)
-        self.feasibility_label.pack(anchor="w", pady=(0, 6))
+        self.feasibility_label.pack(side="left")
+
+        self.export_pdf_btn = ttk.Button(
+            status_row,
+            text="Export PDF Report...",
+            style="Secondary.TButton",
+            command=self.export_pdf_report,
+            state="disabled",
+        )
+        self.export_pdf_btn.pack(side="right")
+
         tk.Label(
             right,
             text="Weighted average of the three scores. Legal feasibility is reported "
@@ -1226,6 +1486,7 @@ class RateOnomyApp(tk.Tk):
             self.status_frame.pack(side="right", padx=(0, 16))
             self.spinner.start()
             self.config(cursor="watch")
+            self.export_pdf_btn.config(state="disabled")
         else:
             self.spinner.stop()
             self.status_frame.pack_forget()
@@ -1304,6 +1565,39 @@ class RateOnomyApp(tk.Tk):
         feasible = legal["feasible"]
         pill_color = ACCENT if feasible.lower().startswith("legally feasible") else DANGER
         self.feasibility_label.config(text=f"  {feasible}  ", bg=pill_color)
+        self.last_assessment = {
+            "roi": roi,
+            "driv": driv,
+            "legal": legal,
+            "composite": composite,
+            "composite_grade": grade,
+            "profile": self.legal_profile,
+        }
+        self.export_pdf_btn.config(state="normal")
+
+    def export_pdf_report(self):
+        if self.last_assessment is None:
+            return
+        state_code = self.last_assessment["profile"].state
+        default_name = f"RateOnomy_Report_{state_code}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        filepath = filedialog.asksaveasfilename(
+            title="Save RateOnomy PDF Report",
+            defaultextension=".pdf",
+            initialfile=default_name,
+            filetypes=[("PDF Document", "*.pdf")],
+            parent=self,
+        )
+        if not filepath:
+            return
+        try:
+            export_assessment_pdf(filepath, self.last_assessment)
+            messagebox.showinfo(
+                "PDF Exported",
+                f"Report successfully saved to:\n{filepath}",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("PDF Export Error", str(exc), parent=self)
 
     def clear(self):
         self.image_path = None
@@ -1327,7 +1621,8 @@ class RateOnomyApp(tk.Tk):
         self.legal_panel.summary_label.config(text=SUMMARIES["legal"])
         if self.legal_window is not None and self.legal_window.winfo_exists():
             self.legal_window.destroy()
-
+        self.last_assessment = None
+        self.export_pdf_btn.config(state="disabled")
 
 if __name__ == "__main__":
     prompt_for_api_keys()
