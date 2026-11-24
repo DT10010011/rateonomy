@@ -298,12 +298,20 @@ def compute_legal_score(farmer_profile: FarmerProfile | None = None):
         else "None"
     )
 
+    is_fallback = "fallback" in res.model_used.lower()
+    engine_label = (
+        "Local Corpus (API Fallback)"
+        if is_fallback
+        else f"Gemini ({res.model_used})"
+    )
+
     details = [
         ("State / Activity", f"{farmer_profile.state} ({farmer_profile.activity})"),
         ("OSHA Small-Farm Exempt", "Yes" if res.osha_small_farm_exempt else "No"),
         ("Triggered Statutes", citations_count),
         ("Human Road Driver Req.", road_req),
         ("Min Supervision Floor", sup_floor),
+        ("Evaluation Engine", engine_label),
     ]
 
     return {
@@ -993,7 +1001,19 @@ class LegalReportWindow(tk.Toplevel):
                  fg=HEADER_SUB, bg=HEADER, wraplength=630, justify="left").pack(
                      anchor="w", padx=20, pady=(0, 12)
                  )
-
+        if "fallback" in res.model_used.lower():
+            banner = tk.Frame(self, bg="#FFF3CD", highlightbackground="#FFEEBA", highlightthickness=1)
+            banner.pack(fill="x", padx=18, pady=(12, 0))
+            tk.Label(
+                banner,
+                text="⚠ Gemini API timed out — showing deterministic corpus summary. "
+                     "Your score, grade, citations, and ROI flags remain 100% accurate.",
+                font=(FONT, 9, "bold"),
+                fg="#856404",
+                bg="#FFF3CD",
+                wraplength=630,
+                justify="left",
+            ).pack(anchor="w", padx=12, pady=8)
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=18, pady=14)
 
