@@ -419,6 +419,16 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
         textColor=colors.HexColor("#6B7770"),
     )
 
+    big_score_style = ParagraphStyle(
+        "BigCompositeScore",
+        parent=body_style,
+        fontSize=22,
+        leading=26,
+        spaceBefore=4,
+        spaceAfter=4,
+    )
+
+
     story = []
 
     # --- Header Banner ---
@@ -470,14 +480,19 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
     comp_table = Table(
         [
             [
-                Paragraph(
-                    f"<b>Composite Autonomy Score</b><br/>"
-                    f"<font size=22 color='#2F5D3A'><b>{composite:.1f} / 10</b></font>  "
-                    f"<b>(Grade {escape(comp_grade)})</b><br/>"
-                    f"<font size=8 color='#6B7770'>Weights: {roi_pct}% ROI + "
-                    f"{driv_pct}% Drivability + {legal_pct}% Legal</font>",
-                    body_style,
-                ),
+                [
+                    Paragraph("<b>Composite Autonomy Score</b>", body_style),
+                    Paragraph(
+                        f"<font color='#2F5D3A'><b>{composite:.1f} / 10</b></font> "
+                        f"<font size=10><b>(Grade {escape(comp_grade)})</b></font>",
+                        big_score_style,
+                    ),
+                    Paragraph(
+                        f"<font size=8 color='#6B7770'>Weights: {roi_pct}% ROI + "
+                        f"{driv_pct}% Drivability + {legal_pct}% Legal</font>",
+                        muted_style,
+                    ),
+                ],
                 Paragraph(
                     f"<b><font color='{status_fg}'>Compliance &amp; Conditions Summary</font></b><br/>"
                     f"{conditions_html}",
@@ -1325,8 +1340,8 @@ class RateOnomyApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("RateOnomy - Autonomy Decision Support")
-        self.geometry("980x760")
-        self.minsize(920, 720)
+        self.geometry("1160x900")
+        self.minsize(1100, 860)
         self.configure(bg=BG)
         global FONT
         FONT = pick_font()
@@ -1392,6 +1407,10 @@ class RateOnomyApp(tk.Tk):
         tk.Label(self.status_frame, text="Running assessment...", font=(FONT, 10),
                  fg=MUTED, bg=CARD).pack(side="left", padx=(8, 0))
 
+        # Composite card (packed bottom-first so it is never clipped)
+        comp = make_card(body)
+        comp.pack(side="bottom", fill="x", pady=(12, 0))
+
         # Three component panels
         panels = tk.Frame(body, bg=BG)
         panels.pack(fill="both", expand=True, pady=(12, 0))
@@ -1416,8 +1435,7 @@ class RateOnomyApp(tk.Tk):
             panel.set_summary_height(tallest)
 
         # Composite card
-        comp = make_card(body)
-        comp.pack(fill="x", pady=(12, 0))
+
         cin = tk.Frame(comp, bg=CARD)
         cin.pack(fill="x", padx=20, pady=14)
 
@@ -1495,7 +1513,11 @@ class RateOnomyApp(tk.Tk):
     def _on_drivability_inputs(self, image_path, field_area):
         self.image_path = image_path
         self.field_area = field_area
-        self.image_var.set(os.path.basename(image_path) if image_path else "")
+        if image_path:
+            name = os.path.basename(image_path)
+            self.image_var.set(name if len(name) <= 55 else name[:52] + "...")
+        else:
+            self.image_var.set("")
 
     def open_legal_inputs(self):
         if self.legal_window is not None and self.legal_window.winfo_exists():
