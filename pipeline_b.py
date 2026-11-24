@@ -19,6 +19,18 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Automatically loads variables from .env into os.environ
 
+import threading
+
+class AssessmentCancelled(Exception):
+    """Raised when the user cancels while Gemini is being retried."""
+
+RETRYABLE_CODES = {500, 503, 504}   # overloaded / unavailable: retry until cancel or time limit
+RATE_LIMIT_CODE = 429               # may be a daily quota, so only a few rounds
+MAX_RATE_LIMIT_ROUNDS = 2
+BACKOFF_START_S = 5
+BACKOFF_MAX_S = 30
+MAX_RETRY_SECONDS = 600             # stop after 10 minutes even if nobody cancels
+
 GRADE_TO_SCORE = {
     "A": 95,
     "B": 80,
@@ -216,6 +228,7 @@ def evaluate_regulatory_compliance(
     corpus_path: str | Path = "regulatory_corpus.json",
     legal_weight: float = 0.5,
     status_callback: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> PipelineBResult:
     start_time = time.perf_counter()
 
@@ -320,36 +333,83 @@ def evaluate_regulatory_compliance(
         ),
     )
 
+    def check_cancel() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise AssessmentCancelled("Assessment cancelled.")
+
     response = None
     used_model = ""
     last_error: Optional[Exception] = None
+    round_num = 0
+    rate_limit_rounds = 0
+    delay = BACKOFF_START_S
+    deadline = time.monotonic() + MAX_RETRY_SECONDS
 
-    for model_name in CANDIDATE_MODELS:
-        try:
-            report(f"Querying {model_name} ({len(applicable_rules)} rules)...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    response_mime_type="application/json",
-                    response_schema=GeminiRegulatoryAssessment,
-                    temperature=0.0,
-                ),
-            )
-            used_model = model_name
-            break
-        except APIError as err:
-            last_error = err
-            if err.code in (400,404,429, 500, 503, 504):
-                report(f"{model_name} busy (HTTP {err.code}), failing over to next model...")
+    while True:
+        round_num += 1
+        any_transient = False  # did any model fail in a way worth retrying (5xx / timeout)?
+
+        for model_name in CANDIDATE_MODELS:
+            check_cancel()
+            try:
+                report(f"Querying {model_name} (attempt {round_num})...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        response_schema=GeminiRegulatoryAssessment,
+                        temperature=0.0,
+                    ),
+                )
+                used_model = model_name
+                break
+            except APIError as err:
+                last_error = err
+                if "API_KEY" in str(err).upper():
+                    raise  # bad key: show the real error instead of silently falling back
+                if err.code in (400, 404):
+                    report(f"{model_name} not usable (HTTP {err.code}), trying next model...")
+                    continue
+                if err.code == RATE_LIMIT_CODE:
+                    report(f"{model_name} rate-limited, trying next model...")
+                    continue
+                if err.code in RETRYABLE_CODES:
+                    any_transient = True
+                    report(f"{model_name} busy (HTTP {err.code}), trying next model...")
+                    continue
+                raise
+            except Exception as err:  # timeouts / connection errors from whatever HTTP library the SDK uses
+                last_error = err
+                any_transient = True
+                report(f"{model_name} timed out, trying next model...")
                 continue
-            raise
-        except Exception as err:  # noqa: BLE001
-            # Catch network/read timeouts and try the next model immediately
-            last_error = err
-            report(f"{model_name} timed out, failing over to next model...")
-            continue
+
+        if response is not None:
+            break
+
+        # Every model failed this round. Give up (and use the deterministic fallback below)
+        # if nothing was retryable for a few rounds, or if we've hit the time limit.
+        if not any_transient:
+            rate_limit_rounds += 1
+            if rate_limit_rounds >= MAX_RATE_LIMIT_ROUNDS:
+                report("Gemini unavailable (rate limit / model errors), using offline assessment...")
+                break
+        if time.monotonic() + delay > deadline:
+            report("Gemini still unavailable, using offline assessment...")
+            break
+
+        # Wait before the next round, counting down and checking for cancel every second
+        for remaining in range(delay, 0, -1):
+            check_cancel()
+            report(f"Gemini busy, retrying in {remaining}s (attempt {round_num + 1})...")
+            if cancel_event is not None:
+                if cancel_event.wait(1):
+                    raise AssessmentCancelled("Assessment cancelled.")
+            else:
+                time.sleep(1)
+        delay = min(delay * 2, BACKOFF_MAX_S)
 
     numeric_score = GRADE_TO_SCORE[letter_grade]
     elapsed = round(time.perf_counter() - start_time, 2)
