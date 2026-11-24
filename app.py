@@ -18,12 +18,13 @@ from schema import FarmerProfile
 
 from datetime import datetime
 from html import escape
-
+from io import BytesIO
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
+    Image as RLImage,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -537,6 +538,44 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
         ]))
         story.append(tbl)
         story.append(Spacer(1, 8))
+        image_path = assessment.get("image_path")
+        if comp_data is driv and image_path and os.path.exists(image_path):
+            try:
+                with Image.open(image_path) as pil_img:
+                    rgb_img = pil_img.convert("RGB")
+                    orig_w, orig_h = rgb_img.size
+                    buf = BytesIO()
+                    rgb_img.save(buf, format="PNG")
+                    buf.seek(0)
+
+                # Fit image proportionally within 4.5" wide x 2.6" tall
+                max_w, max_h = 4.5 * inch, 2.6 * inch
+                scale = min(max_w / orig_w, max_h / orig_h)
+                disp_w, disp_h = orig_w * scale, orig_h * scale
+
+                img_tbl = Table(
+                    [
+                        [RLImage(buf, width=disp_w, height=disp_h)],
+                        [Paragraph(f"<i>Analyzed Field Image: {escape(os.path.basename(image_path))}</i>",
+                                   muted_style)],
+                    ],
+                    colWidths=[7.2 * inch],
+                )
+                img_tbl.setStyle(TableStyle([
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAF8")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]))
+                story.append(img_tbl)
+                story.append(Spacer(1, 8))
+            except Exception:  # noqa: BLE001
+                story.append(Paragraph(
+                    f"<i>Field image ({escape(os.path.basename(image_path))}) could not be embedded.</i>",
+                    muted_style,
+                ))
+                story.append(Spacer(1, 6))
 
     # --- Detailed Regulatory Compliance Report ---
     story.append(Paragraph("3. Detailed Regulatory Compliance Report", h2_style))
@@ -1572,6 +1611,7 @@ class RateOnomyApp(tk.Tk):
             "composite": composite,
             "composite_grade": grade,
             "profile": self.legal_profile,
+            "image_path": self.image_path,
         }
         self.export_pdf_btn.config(state="normal")
 
