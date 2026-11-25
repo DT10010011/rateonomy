@@ -1,12 +1,12 @@
 Todo list:
 
-1. add input field for the GEMINI_API_KEY for a user to input upon first launch--done
-2. consider capability for multiple farm images-done field size is used to weight them during averaging.
+1. DONE - add input field for the GEMINI_API_KEY for a user to input upon first launch--done
+2. DONE - consider capability for multiple farm images-done field size is used to weight them during averaging.
 field size is currently considered twice once in the field score then for averaging the fields together. 
-3. add in the regulatory code
-4. changing weights in the workflow and the code to equal weight
-5. look into an farmer-facing exportable PDF
-6. fix the fail over issue
+3. DONE - add in the regulatory code
+4. DONE - changing weights in the workflow and the code to equal weight
+5. DONE - look into an farmer-facing exportable PDF
+6. DONE - fix the fail over issue
 7. finish poster
     - regulatory bullets
     - reg output screenshot (CA)
