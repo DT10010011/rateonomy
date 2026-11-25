@@ -12,7 +12,12 @@ from tkinter import ttk, filedialog, messagebox, font as tkfont, simpledialog
 
 from dotenv import dotenv_values, load_dotenv, set_key
 from PIL import Image, ImageDraw, ImageChops, ImageFont, ImageTk
-from inference_sdk import InferenceHTTPClient, InferenceConfiguration
+from inference_sdk import (
+    InferenceHTTPClient,
+    InferenceConfiguration,
+    VisualisationResponseFormat,
+)
+from image import save_and_open_labeled_image
 from pipeline_b import PipelineBResult, evaluate_regulatory_compliance
 from schema import FarmerProfile
 
@@ -192,13 +197,18 @@ def compute_drivability_score(image_path=None, field_area=None):
 
     client = InferenceHTTPClient(
         api_url=ROBOFLOW_API_URL, api_key=api_key
-    ).configure(InferenceConfiguration(api_key_transport="header"))
+    ).configure(InferenceConfiguration(
+        api_key_transport="header",
+        output_visualisation_format=VisualisationResponseFormat.PILLOW,
+    ))
     result = client.run_workflow(
         workspace_name=ROBOFLOW_WORKSPACE,
         workflow_id=ROBOFLOW_WORKFLOW_ID,
         images={"image": image_path},
+        parameters={"visualize": True},
         use_cache=True,
     )
+    save_and_open_labeled_image(result)
 
     preds = _find_predictions(result)
     if preds is None:

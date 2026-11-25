@@ -9,3 +9,5 @@ app.py
 __pycache__/pipeline_b.cpython-313.pyc
 __pycache__/schema.cpython-313.pyc
 __pycache__/app.cpython-313.pyc
+legal_cache.json
+__pycache__/image.cpython-313.pyc
