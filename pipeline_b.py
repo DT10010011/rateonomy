@@ -296,15 +296,14 @@ def evaluate_regulatory_compliance(
                     response_mime_type="application/json",
                     response_schema=GeminiRegulatoryAssessment,
                     temperature=0.0,
-                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
                 ),
             )
             used_model = model_name
             break
         except APIError as err:
             last_error = err
-            if err.code in (429, 500, 503, 504):
-                report(f"{model_name} busy (HTTP {err.code}), failing over to next model...")
+            if err.code in (400, 404, 429, 500, 503, 504):
+                report(f"{model_name} unavailable (HTTP {err.code}), failing over to next model...")
                 continue
             raise
         except Exception as err:  # noqa: BLE001
