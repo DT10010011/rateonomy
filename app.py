@@ -236,6 +236,7 @@ def compute_drivability_score(image_path=None, field_area=None):
             "score": 10.0,
             "summary": "No image selected - using dummy score.",
             "details": [("Obstacle coverage", "N/A (dummy)")],
+            "predictions": [],
         }
     if field_area is None or not math.isfinite(field_area) or field_area <= 0:
         raise ValueError("Enter a field size greater than 0 acres.")
@@ -304,6 +305,7 @@ def compute_drivability_score(image_path=None, field_area=None):
             ("Regions detected", str(len(preds))),
             ("Classes found", ", ".join(sorted({p.get("class", "?") for p in preds})) or "none"),
         ],
+        "predictions": preds,
     }
 
 
@@ -336,6 +338,7 @@ def compute_drivability_score_for_fields(fields):
         "score": round(weighted_score, 1),
         "summary": f"Area-weighted drivability score across {len(fields)} fields.",
         "details": details,
+        "field_predictions": [r.get("predictions", []) for r in results],
     }
 
 
@@ -451,6 +454,42 @@ def compute_composite(roi, drivability, legal):
         + WEIGHTS["drivability"] * drivability
         + WEIGHTS["legal"] * legal
     )
+
+def _render_drivability_overlay(image_path: str, predictions: list) -> Image.Image:
+    """Return a copy of the field image with semi-transparent Roboflow polygons drawn."""
+    with Image.open(image_path) as img:
+        base = img.convert("RGBA")
+
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    line_w = max(2, round(min(base.size) / 250))
+
+    # Draw Drivable polygons first, then NonDrivable on top so obstacles stand out
+    for is_obstacle_pass in (False, True):
+        for pred in predictions:
+            cls = str(pred.get("class", "")).lower()
+            is_non = "non" in cls
+            if is_non != is_obstacle_pass:
+                continue
+
+            pts = [(p["x"], p["y"]) for p in pred.get("points", [])]
+            if len(pts) < 3:
+                continue
+
+            if is_non:
+                fill_color = (220, 53, 69, 95)      # Translucent red
+                outline_color = (220, 53, 69, 230)
+            elif "driv" in cls:
+                fill_color = (46, 139, 87, 75)      # Translucent green
+                outline_color = (46, 139, 87, 210)
+            else:
+                fill_color = (212, 160, 23, 85)     # Fallback amber
+                outline_color = (212, 160, 23, 220)
+
+            draw.polygon(pts, fill=fill_color, outline=outline_color)
+            draw.line(pts + [pts[0]], fill=outline_color, width=line_w)
+
+    return Image.alpha_composite(base, overlay).convert("RGB")
 
 def export_assessment_pdf(filepath: str, assessment: dict) -> None:
     """Generate a formatted PDF report of the RateOnomy assessment results."""
@@ -657,35 +696,61 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
         story.append(tbl)
         story.append(Spacer(1, 8))
         image_paths = assessment.get("image_paths") or []
+        field_preds_list = driv.get("field_predictions") or []
         if comp_data is driv:
             for field_num, image_path in enumerate(image_paths, start=1):
                 if not image_path or not os.path.exists(image_path):
                     continue
                 try:
                     with Image.open(image_path) as pil_img:
-                        rgb_img = pil_img.convert("RGB")
-                        orig_w, orig_h = rgb_img.size
-                        buf = BytesIO()
-                        rgb_img.save(buf, format="PNG")
-                        buf.seek(0)
+                        orig_rgb = pil_img.convert("RGB")
+                        orig_w, orig_h = orig_rgb.size
+                        orig_buf = BytesIO()
+                        orig_rgb.save(orig_buf, format="PNG")
+                        orig_buf.seek(0)
 
-                    # Fit image proportionally within 4.5" wide x 2.6" tall
-                    max_w, max_h = 4.5 * inch, 2.6 * inch
+                    preds = (
+                        field_preds_list[field_num - 1]
+                        if field_num - 1 < len(field_preds_list)
+                        else []
+                    )
+                    overlay_rgb = _render_drivability_overlay(image_path, preds)
+                    overlay_buf = BytesIO()
+                    overlay_rgb.save(overlay_buf, format="PNG")
+                    overlay_buf.seek(0)
+
+                    # Fit each image proportionally inside its 3.35" wide x 2.3" tall column
+                    max_w, max_h = 3.35 * inch, 2.3 * inch
                     scale = min(max_w / orig_w, max_h / orig_h)
                     disp_w, disp_h = orig_w * scale, orig_h * scale
 
                     img_tbl = Table(
                         [
-                            [RLImage(buf, width=disp_w, height=disp_h)],
-                            [Paragraph(f"<i>Field {field_num} image: {escape(os.path.basename(image_path))}</i>",
-                                       muted_style)],
+                            [
+                                RLImage(orig_buf, width=disp_w, height=disp_h),
+                                RLImage(overlay_buf, width=disp_w, height=disp_h),
+                            ],
+                            [
+                                Paragraph(
+                                    f"<i>Field {field_num} Input ({escape(os.path.basename(image_path))})</i>",
+                                    muted_style,
+                                ),
+                                Paragraph(
+                                    f"<i>Field {field_num} Detection Overlay "
+                                    "(<font color='#2E8B57'><b>Green</b></font> = Drivable, "
+                                    "<font color='#DC3545'><b>Red</b></font> = Non-Drivable)</i>",
+                                    muted_style,
+                                ),
+                            ],
                         ],
-                        colWidths=[7.2 * inch],
+                        colWidths=[3.6 * inch, 3.6 * inch],
                     )
                     img_tbl.setStyle(TableStyle([
                         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAF8")),
                         ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
                         ("TOPPADDING", (0, 0), (-1, -1), 6),
                         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                     ]))
