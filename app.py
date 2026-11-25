@@ -278,8 +278,8 @@ def compute_drivability_score(image_path=None, field_area=None):
     image_coverage = drivable_frac * 100
     obstacle_adjustment = nondrivable_count*0.1
     ratings = [
-        (98, 10), (96, 9), (94, 8), (92, 7), (90, 6),
-        (88, 5), (86, 4), (84, 3), (82, 2), (0, 1),
+        (95, 10), (90, 9), (85, 8), (80, 7), (75, 6),
+        (70, 5), (65, 4), (60, 3), (55, 2), (50, 1),
     ]
     image_rating = 1
     for limit, rating in ratings:

@@ -12,3 +12,4 @@ __pycache__/app.cpython-313.pyc
 .venv/
 legal_cache.json
 legal_cache.json.tmp
+__pycache__/image.cpython-313.pyc
