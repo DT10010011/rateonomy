@@ -300,7 +300,7 @@ def compute_drivability_score(image_path=None, field_area=None):
             ("Drivable coverage", f"{drivable_frac:.1%}"),
             ("Image drivability rating", f"{image_rating} / 10"),
             ("NonDrivable objects", str(nondrivable_count)),
-            ("Field size", f"{field_area:,.1f} acres"),
+            ("Field size", f"{field_area:,.0f} acres"),
             ("Field size rating", f"{field_size_score:.1f} / 10"),
             ("Regions detected", str(len(preds))),
             ("Classes found", ", ".join(sorted({p.get("class", "?") for p in preds})) or "none"),
@@ -323,22 +323,32 @@ def compute_drivability_score_for_fields(fields):
         result["score"] * field["field_area"]
         for field, result in zip(fields, results)
     ) / total_area
+
     details = [
         ("Fields analyzed", str(len(fields))),
         ("Combination method", "Area-weighted average"),
     ]
-    for index, result in enumerate(results, start=1):
-        details.append((f"Field {index} score", f"{result['score']:.1f} / 10"))
-        details.extend(
-            (f"Field {index} {label}", value)
-            for label, value in result["details"]
+    field_reports = []
+    for index, (field, result) in enumerate(zip(fields, results), start=1):
+        details.append(
+            (f"Field {index} ({field['field_area']:,.0f} acres)", f"{result['score']:.1f} / 10")
         )
+        field_reports.append({
+            "index": index,
+            "image_path": field["image_path"],
+            "field_area": field["field_area"],
+            "score": result["score"],
+            "grade": grade_from_score(result["score"]),
+            "details": result["details"],
+            "predictions": result.get("predictions", []),
+        })
 
     return {
         "score": round(weighted_score, 1),
         "summary": f"Area-weighted drivability score across {len(fields)} fields.",
         "details": details,
         "field_predictions": [r.get("predictions", []) for r in results],
+        "field_reports": field_reports,
     }
 
 
@@ -698,9 +708,43 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
         image_paths = assessment.get("image_paths") or []
         field_preds_list = driv.get("field_predictions") or []
         if comp_data is driv:
-            for field_num, image_path in enumerate(image_paths, start=1):
+            field_reports = driv.get("field_reports") or []
+            for rep in field_reports:
+                field_num = rep["index"]
+                image_path = rep["image_path"]
                 if not image_path or not os.path.exists(image_path):
                     continue
+
+                card_rows = []
+                card_styles = [
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+
+                # Row 0: Field header + per-field score & grade
+                card_rows.append([
+                    Paragraph(
+                        f"<b>Field {field_num} — {escape(os.path.basename(image_path))}</b>",
+                        body_style,
+                    ),
+                    Paragraph(
+                        f"<b>Score: {rep['score']:.1f} / 10 (Grade {escape(rep['grade'])})</b>",
+                        ParagraphStyle(
+                            f"FieldScoreRight{field_num}",
+                            parent=body_style,
+                            alignment=2,  # Right-aligned
+                        ),
+                    ),
+                ])
+                card_styles.extend([
+                    ("BACKGROUND", (0, 0), (1, 0), colors.HexColor("#F2F5F1")),
+                    ("LINEBELOW", (0, 0), (1, 0), 0.6, colors.HexColor("#DCE3DC")),
+                ])
+
+                # Row 1: Side-by-side Input Image and Roboflow Detection Overlay
                 try:
                     with Image.open(image_path) as pil_img:
                         orig_rgb = pil_img.convert("RGB")
@@ -709,59 +753,81 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
                         orig_rgb.save(orig_buf, format="PNG")
                         orig_buf.seek(0)
 
-                    preds = (
-                        field_preds_list[field_num - 1]
-                        if field_num - 1 < len(field_preds_list)
-                        else []
+                    overlay_rgb = _render_drivability_overlay(
+                        image_path, rep.get("predictions", [])
                     )
-                    overlay_rgb = _render_drivability_overlay(image_path, preds)
                     overlay_buf = BytesIO()
                     overlay_rgb.save(overlay_buf, format="PNG")
                     overlay_buf.seek(0)
 
-                    # Fit each image proportionally inside its 3.35" wide x 2.3" tall column
-                    max_w, max_h = 3.35 * inch, 2.3 * inch
+                    max_w, max_h = 3.35 * inch, 2.2 * inch
                     scale = min(max_w / orig_w, max_h / orig_h)
                     disp_w, disp_h = orig_w * scale, orig_h * scale
 
-                    img_tbl = Table(
+                    img_pair_tbl = Table(
                         [
                             [
                                 RLImage(orig_buf, width=disp_w, height=disp_h),
                                 RLImage(overlay_buf, width=disp_w, height=disp_h),
                             ],
                             [
+                                Paragraph("<i>Input Field Image</i>", muted_style),
                                 Paragraph(
-                                    f"<i>Field {field_num} Input ({escape(os.path.basename(image_path))})</i>",
-                                    muted_style,
-                                ),
-                                Paragraph(
-                                    f"<i>Field {field_num} Detection Overlay "
+                                    "<i>Roboflow Overlay "
                                     "(<font color='#2E8B57'><b>Green</b></font> = Drivable, "
                                     "<font color='#DC3545'><b>Red</b></font> = Non-Drivable)</i>",
                                     muted_style,
                                 ),
                             ],
                         ],
-                        colWidths=[3.6 * inch, 3.6 * inch],
+                        colWidths=[3.5 * inch, 3.5 * inch],
                     )
-                    img_tbl.setStyle(TableStyle([
+                    img_pair_tbl.setStyle(TableStyle([
                         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAF8")),
-                        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
-                        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#DCE3DC")),
-                        ("TOPPADDING", (0, 0), (-1, -1), 6),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
                     ]))
-                    story.append(img_tbl)
-                    story.append(Spacer(1, 8))
+                    card_rows.append([img_pair_tbl, ""])
                 except Exception:  # noqa: BLE001
-                    story.append(Paragraph(
-                        f"<i>Field {field_num} image ({escape(os.path.basename(image_path))}) could not be embedded.</i>",
-                        muted_style,
-                    ))
-                    story.append(Spacer(1, 6))
+                    card_rows.append([
+                        Paragraph(
+                            f"<i>Field {field_num} image ({escape(os.path.basename(image_path))}) could not be embedded.</i>",
+                            muted_style,
+                        ),
+                        "",
+                    ])
+
+                card_styles.extend([
+                    ("SPAN", (0, 1), (1, 1)),
+                    ("BACKGROUND", (0, 1), (1, 1), colors.HexColor("#F8FAF8")),
+                    ("LINEBELOW", (0, 1), (1, 1), 0.6, colors.HexColor("#DCE3DC")),
+                ])
+
+                # Rows 2+: Two-column grid of the 8 field metrics (matching DrivabilityReportWindow)
+                field_details = rep.get("details") or []
+                for idx in range(0, len(field_details), 2):
+                    left_lbl, left_val = field_details[idx]
+                    left_cell = Paragraph(
+                        f"<font color='#6B7770'>{escape(str(left_lbl))}:</font> "
+                        f"<b>{escape(str(left_val))}</b>",
+                        body_style,
+                    )
+                    if idx + 1 < len(field_details):
+                        right_lbl, right_val = field_details[idx + 1]
+                        right_cell = Paragraph(
+                            f"<font color='#6B7770'>{escape(str(right_lbl))}:</font> "
+                            f"<b>{escape(str(right_val))}</b>",
+                            body_style,
+                        )
+                    else:
+                        right_cell = ""
+                    card_rows.append([left_cell, right_cell])
+
+                field_card = Table(card_rows, colWidths=[3.6 * inch, 3.6 * inch])
+                field_card.setStyle(TableStyle(card_styles))
+                story.append(field_card)
+                story.append(Spacer(1, 8))
 
     # --- Detailed Regulatory Compliance Report ---
     story.append(Paragraph("3. Detailed Regulatory Compliance Report", h2_style))
@@ -1072,12 +1138,18 @@ class ScorePanel(tk.Frame):
         self.summary_frame = tk.Frame(inner, bg=CARD)
         self.summary_frame.pack(fill="x")
         self.summary_label = tk.Label(self.summary_frame, text=summary, font=(FONT, 9),
-                                      fg=MUTED, bg=CARD, wraplength=230, justify="left")
-        self.summary_label.pack(anchor="nw")
+                                      fg=MUTED, bg=CARD, justify="left", anchor="nw")
+        self.summary_label.pack(fill="x", anchor="nw")
+        self.summary_frame.bind(
+            "<Configure>",
+            lambda e: self.summary_label.config(wraplength=max(1, e.width)),
+        )
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=10)
         self.details = tk.Frame(inner, bg=CARD)
         self.details.pack(fill="x")
+        self.footer = tk.Frame(inner, bg=CARD)
+        self.footer.pack(side="bottom", fill="x", pady=(10, 0))
 
     def set_summary_height(self, height):
         self.summary_frame.config(height=height)
@@ -1101,12 +1173,24 @@ class ScorePanel(tk.Frame):
             tk.Label(row, text=value, font=(FONT, 10, "bold"), fg=TEXT,
                      bg=CARD).pack(side="right")
 
+    def set_action(self, text, command):
+        for child in self.footer.winfo_children():
+            child.destroy()
+        ttk.Button(
+            self.footer,
+            text=text,
+            style="Secondary.TButton",
+            command=command,
+        ).pack(fill="x")
+
     def clear(self):
         self.score_label.config(text="--", fg=PENDING)
         self.badge.config(text="-", bg=PENDING)
         self.note.config(text="")
         self.bar.set(0, PENDING)
         self._clear_details()
+        for child in self.footer.winfo_children():
+            child.destroy()
 
 
 CONVENTIONAL_FIELDS = [
@@ -1615,6 +1699,183 @@ class LegalInputWindow(tk.Toplevel):
         self.on_apply(profile)
         self.destroy()
 
+class DrivabilityReportWindow(tk.Toplevel):
+    """Displays per-field drivability metrics and side-by-side detection overlays."""
+
+    def __init__(self, master, driv_result: dict):
+        super().__init__(master)
+        self.title("Detailed Field Drivability Report")
+        center_window(self, 780, 640)
+        self.configure(bg=BG)
+        self._photos = []  # Keep PhotoImage references alive
+
+        reports = driv_result.get("field_reports") or []
+
+        header = tk.Frame(self, bg=HEADER)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text=f"Field Drivability Report — Overall {driv_result['score']:.1f} / 10 "
+                 f"(Grade {grade_from_score(driv_result['score'])})",
+            font=(FONT, 16, "bold"),
+            fg="white",
+            bg=HEADER,
+        ).pack(anchor="w", padx=20, pady=(12, 2))
+        tk.Label(
+            header,
+            text=driv_result.get("summary", ""),
+            font=(FONT, 10),
+            fg=HEADER_SUB,
+            bg=HEADER,
+        ).pack(anchor="w", padx=20, pady=(0, 12))
+
+        footer = tk.Frame(self, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=18, pady=(0, 14))
+        ttk.Button(
+            footer, text="Close", style="Secondary.TButton", command=self.destroy
+        ).pack(side="right")
+
+        # Scrollable container for 1 or more field cards
+        container = tk.Frame(self, bg=BG)
+        container.pack(fill="both", expand=True, padx=18, pady=14)
+        canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        scroll_body = tk.Frame(canvas, bg=BG)
+        win_id = canvas.create_window((0, 0), window=scroll_body, anchor="nw")
+        scroll_body.bind(
+            "<Configure>",
+            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(win_id, width=e.width),
+        )
+
+        if not reports:
+            tk.Label(
+                scroll_body,
+                text="No field images were analyzed in this assessment.",
+                font=(FONT, 10),
+                fg=MUTED,
+                bg=BG,
+            ).pack(pady=20)
+            return
+
+        for rep in reports:
+            card = make_card(scroll_body)
+            card.pack(fill="x", pady=(0, 12))
+            inner = tk.Frame(card, bg=CARD)
+            inner.pack(fill="x", padx=16, pady=14)
+
+            # Card header: Field title + score badge
+            top = tk.Frame(inner, bg=CARD)
+            top.pack(fill="x", pady=(0, 10))
+            fname = os.path.basename(rep["image_path"])
+            tk.Label(
+                top,
+                text=f"Field {rep['index']} — {fname}",
+                font=(FONT, 12, "bold"),
+                fg=TEXT,
+                bg=CARD,
+            ).pack(side="left")
+
+            grade = rep["grade"]
+            color = GRADE_COLORS.get(grade, PENDING)
+            tk.Label(
+                top,
+                text=f"  {rep['score']:.1f} / 10 (Grade {grade})  ",
+                font=(FONT, 10, "bold"),
+                fg="white",
+                bg=color,
+            ).pack(side="right")
+
+            # Side-by-side images (Original vs. Roboflow Overlay)
+            img_row = tk.Frame(inner, bg="#F8FAF8", highlightbackground=BORDER, highlightthickness=1)
+            img_row.pack(fill="x", pady=(0, 10))
+            img_row.columnconfigure(0, weight=1, uniform="img")
+            img_row.columnconfigure(1, weight=1, uniform="img")
+
+            try:
+                with Image.open(rep["image_path"]) as raw_img:
+                    orig_rgb = raw_img.convert("RGB")
+                overlay_rgb = _render_drivability_overlay(
+                    rep["image_path"], rep.get("predictions", [])
+                )
+
+                # Scale proportionally to fit side-by-side inside the 780px dialog
+                max_w, max_h = 320, 210
+                scale = min(max_w / orig_rgb.width, max_h / orig_rgb.height)
+                disp_size = (max(1, round(orig_rgb.width * scale)), max(1, round(orig_rgb.height * scale)))
+
+                orig_photo = ImageTk.PhotoImage(
+                    orig_rgb.resize(disp_size, Image.Resampling.LANCZOS), master=self
+                )
+                overlay_photo = ImageTk.PhotoImage(
+                    overlay_rgb.resize(disp_size, Image.Resampling.LANCZOS), master=self
+                )
+                self._photos.extend([orig_photo, overlay_photo])
+
+                left_box = tk.Frame(img_row, bg="#F8FAF8", pady=8)
+                left_box.grid(row=0, column=0, sticky="nsew")
+                tk.Label(left_box, image=orig_photo, bg="#F8FAF8").pack()
+                tk.Label(
+                    left_box, text="Input Field Image", font=(FONT, 9, "italic"),
+                    fg=MUTED, bg="#F8FAF8"
+                ).pack(pady=(4, 0))
+
+                right_box = tk.Frame(img_row, bg="#F8FAF8", pady=8)
+                right_box.grid(row=0, column=1, sticky="nsew")
+                tk.Label(right_box, image=overlay_photo, bg="#F8FAF8").pack()
+                caption_row = tk.Frame(right_box, bg="#F8FAF8")
+                caption_row.pack(pady=(4, 0))
+                caption_parts = [
+                    ("Roboflow Overlay (", MUTED, (FONT, 9, "italic")),
+                    ("Green", "#2E8B57", (FONT, 9, "bold", "italic")),
+                    (" = Drivable, ", MUTED, (FONT, 9, "italic")),
+                    ("Red", "#DC3545", (FONT, 9, "bold", "italic")),
+                    (" = Non-Drivable)", MUTED, (FONT, 9, "italic")),
+                ]
+                for part_text, part_color, part_font in caption_parts:
+                    tk.Label(
+                        caption_row,
+                        text=part_text,
+                        font=part_font,
+                        fg=part_color,
+                        bg="#F8FAF8",
+                        padx=0,
+                        bd=0,
+                    ).pack(side="left")
+
+            except Exception:  # noqa: BLE001
+                tk.Label(
+                    img_row,
+                    text="Field image preview unavailable.",
+                    font=(FONT, 9, "italic"),
+                    fg=MUTED,
+                    bg="#F8FAF8",
+                    pady=12,
+                ).grid(row=0, column=0, columnspan=2)
+
+            # Two-column grid of all field detection metrics
+            metrics = tk.Frame(inner, bg=CARD)
+            metrics.pack(fill="x")
+            metrics.columnconfigure(0, weight=1, uniform="m")
+            metrics.columnconfigure(1, weight=1, uniform="m")
+
+            for idx, (label, value) in enumerate(rep["details"]):
+                col = idx % 2
+                row_idx = idx // 2
+                cell = tk.Frame(metrics, bg=CARD)
+                cell.grid(
+                    row=row_idx, column=col, sticky="ew",
+                    padx=(0 if col == 0 else 12, 12 if col == 0 else 0), pady=2
+                )
+                tk.Label(cell, text=label, font=(FONT, 10), fg=MUTED, bg=CARD).pack(side="left")
+                tk.Label(cell, text=value, font=(FONT, 10, "bold"), fg=TEXT, bg=CARD).pack(side="right")
 
 class LegalReportWindow(tk.Toplevel):
     """Displays the full In-Field vs. Public Road breakdown and workarounds."""
@@ -1688,6 +1949,7 @@ class RateOnomyApp(tk.Tk):
         self.legal_profile = None
         self.last_assessment = None
         self.last_legal_result = None
+        self.last_driv_result = None
 
         # Header banner
         header = tk.Frame(self, bg=HEADER)
@@ -1788,6 +2050,9 @@ class RateOnomyApp(tk.Tk):
         # Give every summary the height of the tallest one so the fields
         # below them start at the same vertical position.
         self.update_idletasks()
+        for panel in all_panels:
+            panel.summary_label.config(wraplength=max(1, panel.summary_frame.winfo_width()))
+        self.update_idletasks()
         tallest = max(p.summary_label.winfo_reqheight() for p in all_panels)
         for panel in all_panels:
             panel.set_summary_height(tallest)
@@ -1884,6 +2149,7 @@ class RateOnomyApp(tk.Tk):
         self.legal_panel.summary_label.config(text=SUMMARIES["legal"])
         self.last_legal_result = None
         self.last_assessment = None
+        self.last_driv_result = None
         self.export_pdf_btn.config(state="disabled")
 
     def open_drivability_inputs(self):
@@ -1919,6 +2185,11 @@ class RateOnomyApp(tk.Tk):
         self.legal_btn.config(text=f"Legal Inputs ({profile.state})...")
         self._clear_results()
         self._update_input_status()
+
+    def open_drivability_report(self):
+        if self.last_driv_result is not None:
+            win = DrivabilityReportWindow(self, self.last_driv_result)
+            win.transient(self)
 
     def open_legal_report(self):
         if self.last_legal_result is not None:
@@ -2018,15 +2289,20 @@ class RateOnomyApp(tk.Tk):
         self.driv_panel.update_result(driv, grade_from_score(driv["score"]))
         self.legal_panel.update_result(legal, legal["grade"], legal["label"])
 
+        self.last_driv_result = driv
+        if driv.get("field_reports"):
+            self.driv_panel.set_action(
+                "View Field Details & Overlays...",
+                self.open_drivability_report,
+            )
+
         self.last_legal_result = legal.get("full_result")
         self.legal_panel.summary_label.config(text=legal["summary"])
         if self.last_legal_result is not None:
-            ttk.Button(
-                self.legal_panel.details,
-                text="View In-Field & Road Report...",
-                style="Secondary.TButton",
-                command=self.open_legal_report,
-            ).pack(fill="x", pady=(8, 0))
+            self.legal_panel.set_action(
+                "View In-Field & Road Report...",
+                self.open_legal_report,
+            )
 
         composite = compute_composite(roi["score"], driv["score"], legal["score"])
         grade = grade_from_score(composite)
