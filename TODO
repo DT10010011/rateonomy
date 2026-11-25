@@ -1,11 +1,11 @@
 Todo list:
 
-1. add input field for the GEMINI_API_KEY for a user to input upon first launch
+1. DONE add input field for the GEMINI_API_KEY for a user to input upon first launch
 2. consider capability for multiple farm images
-3. add in the regulatory code
+3. DONE add in the regulatory code
 4. changing weights in the workflow and the code to equal weight
-5. look into an farmer-facing exportable PDF
-6. fix the fail over issue
+5. DONE - look into an farmer-facing exportable PDF
+6. DONE fix the fail over issue
 7. finish poster
     - regulatory bullets
     - reg output screenshot (CA)
