@@ -2286,6 +2286,7 @@ class RateOnomyApp(tk.Tk):
 
     def _show_results(self, roi, driv, legal):
         self.roi_panel.update_result(roi, grade_from_score(roi["score"]))
+        self.roi_panel.set_action("View Results", self.open_roi_calculator)
         self.driv_panel.update_result(driv, grade_from_score(driv["score"]))
         self.legal_panel.update_result(legal, legal["grade"], legal["label"])
 
