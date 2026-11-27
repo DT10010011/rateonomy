@@ -487,11 +487,11 @@ def _render_drivability_overlay(image_path: str, predictions: list) -> Image.Ima
                 continue
 
             if is_non:
-                fill_color = (220, 53, 69, 95)      # Translucent red
-                outline_color = (220, 53, 69, 230)
+                fill_color = (232, 74, 39, 95)  # Translucent Illini Orange
+                outline_color = (232, 74, 39, 230)
             elif "driv" in cls:
-                fill_color = (46, 139, 87, 75)      # Translucent green
-                outline_color = (46, 139, 87, 210)
+                fill_color = (30, 58, 138, 85)  # Translucent Illini Blue
+                outline_color = (30, 58, 138, 240)
             else:
                 fill_color = (212, 160, 23, 85)     # Fallback amber
                 outline_color = (212, 160, 23, 220)
@@ -774,11 +774,10 @@ def export_assessment_pdf(filepath: str, assessment: dict) -> None:
                                 Paragraph("<i>Input Field Image</i>", muted_style),
                                 Paragraph(
                                     "<i>Roboflow Overlay "
-                                    "(<font color='#2E8B57'><b>Green</b></font> = Drivable, "
-                                    "<font color='#DC3545'><b>Red</b></font> = Non-Drivable)</i>",
+                                    "(<font color='#13294B'><b>Blue</b></font> = Drivable, "
+                                    "<font color='#E84A27'><b>Orange</b></font> = Non-Drivable)</i>",
                                     muted_style,
-                                ),
-                            ],
+                                ),                            ],
                         ],
                         colWidths=[3.5 * inch, 3.5 * inch],
                     )
@@ -1834,9 +1833,9 @@ class DrivabilityReportWindow(tk.Toplevel):
                 caption_row.pack(pady=(4, 0))
                 caption_parts = [
                     ("Roboflow Overlay (", MUTED, (FONT, 9, "italic")),
-                    ("Green", "#2E8B57", (FONT, 9, "bold", "italic")),
+                    ("Blue", "#13294B", (FONT, 9, "bold", "italic")),
                     (" = Drivable, ", MUTED, (FONT, 9, "italic")),
-                    ("Red", "#DC3545", (FONT, 9, "bold", "italic")),
+                    ("Orange", "#E84A27", (FONT, 9, "bold", "italic")),
                     (" = Non-Drivable)", MUTED, (FONT, 9, "italic")),
                 ]
                 for part_text, part_color, part_font in caption_parts:
